@@ -13,7 +13,13 @@ package.domain = com.msksoftwaresolutions
 source.dir = .
 
 # (list) Source files to include (let empty to include all the files)
-source.include_exts = py,png,jpg,kv,atlas,json,txt,xml
+source.include_exts = py,png,jpg,kv,atlas,json,txt,xml,ico
+
+# (str) Icon of the application
+icon.filename = %(source.dir)s/icon.png
+
+# (str) Presplash of the application
+presplash.filename = %(source.dir)s/icon.png
 
 # (list) List of directories to exclude from the APK
 source.exclude_dirs = tests, bin, .venv, venv, .git, .github, build, dist, msk-ytdl-site, .pytest_cache, __pycache__, docs, scripts, .agents

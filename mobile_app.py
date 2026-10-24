@@ -547,33 +547,63 @@ if KIVY_AVAILABLE:
             content.bind(minimum_height=content.setter("height"))
 
             # -------------------------------------------------------------
-            # 1. Header Card (MSK YTDL Branding)
+            # 1. Header Card (MSK YTDL Branding & Logo)
             # -------------------------------------------------------------
             header_card = StyledCard(
-                orientation="vertical",
-                padding=[dp(16), dp(14)],
-                spacing=dp(3),
+                orientation="horizontal",
+                padding=[dp(14), dp(10)],
+                spacing=dp(12),
                 size_hint_y=None,
-                height=dp(76),
+                height=dp(72),
                 bg_color=(0.09, 0.11, 0.17, 1.0),
             )
+            
+            # Resolve logo file path
+            logo_path = ""
+            for candidate in (
+                Path(__file__).resolve().parent / "icon.png",
+                Path("icon.png"),
+                Path("assets/logo.png"),
+            ):
+                if candidate.exists():
+                    logo_path = str(candidate)
+                    break
+            
+            if logo_path:
+                app_logo = Image(
+                    source=logo_path,
+                    size_hint=(None, None),
+                    size=(dp(50), dp(50)),
+                    allow_stretch=True,
+                    keep_ratio=True,
+                )
+                header_card.add_widget(app_logo)
+
+            header_text_box = BoxLayout(orientation="vertical", spacing=dp(2))
             app_version = get_app_version()
             brand_label = Label(
                 text=f"[b][color=#FFB300]MSK[/color] YTDL[/b]  [size=13sp][color=#00E676]v{app_version}[/color][/size]",
                 markup=True,
-                font_size="24sp",
+                font_size="22sp",
                 size_hint_y=None,
-                height=dp(32),
+                height=dp(28),
+                halign="left",
+                valign="middle",
             )
+            brand_label.bind(size=brand_label.setter("text_size"))
             tagline = Label(
                 text=f"MSK YTDL v{app_version} • by MSK Software Solutions",
-                font_size="12sp",
+                font_size="11sp",
                 color=(0.7, 0.75, 0.85, 1.0),
                 size_hint_y=None,
                 height=dp(18),
+                halign="left",
+                valign="middle",
             )
-            header_card.add_widget(brand_label)
-            header_card.add_widget(tagline)
+            tagline.bind(size=tagline.setter("text_size"))
+            header_text_box.add_widget(brand_label)
+            header_text_box.add_widget(tagline)
+            header_card.add_widget(header_text_box)
             content.add_widget(header_card)
 
             # -------------------------------------------------------------

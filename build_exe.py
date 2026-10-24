@@ -210,6 +210,11 @@ def build_executable(onefile: bool = False) -> bool:
     if version_file.exists():
         cmd.extend(["--version-file", str(version_file)])
 
+    icon_file = PROJECT_ROOT / "icon.ico"
+    if icon_file.exists():
+        console.print(f"[green]Embedding application icon from:[/green] {icon_file}")
+        cmd.extend(["--icon", str(icon_file)])
+
     if onefile:
         cmd.append("--onefile")
     else:

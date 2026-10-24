@@ -46,5 +46,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    version='D:/Sumit/projects/VideMate-Clone/msk-ytdl/windows_version_info.txt',
+    version='windows_version_info.txt',
+    icon='icon.ico',
 )
