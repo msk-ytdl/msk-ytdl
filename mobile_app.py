@@ -100,22 +100,36 @@ class AndroidYTDLLogger:
 
 def normalize_youtube_url(text: str) -> Optional[str]:
     """
-    Robustly extract and canonicalize any YouTube link, query fragment, or video ID.
+    Robustly extract and canonicalize any YouTube link, playlist, query fragment, or video ID.
     Handles:
+      - 'https://www.youtube.com/playlist?list=PL...'
+      - 'https://www.youtube.com/watch?v=UQyh7QIVaDU&list=PL...'
+      - 'https://youtu.be/UQyh7QIVaDU?list=PL...'
       - 'v=UQyh7QIVaDU&si=...'
       - 'watch?v=UQyh7QIVaDU'
       - 'UQyh7QIVaDU' (raw 11-char ID)
       - 'https://youtu.be/UQyh7QIVaDU?si=...'
       - 'https://www.youtube.com/watch?v=UQyh7QIVaDU'
       - 'https://www.youtube.com/shorts/UQyh7QIVaDU'
-      - 'https://www.youtube.com/playlist?list=PL...'
       - Text containing links shared from YouTube app
     """
     if not text:
         return None
     raw = text.strip()
 
-    # 1. Full YouTube watch, youtu.be, shorts, live, or embed URL with video ID
+    # 1. Direct playlist URL: youtube.com/playlist?list=...
+    match_plist = re.search(
+        r"https?://(?:www\.|m\.)?youtube\.com/playlist\?list=([a-zA-Z0-9_-]+)",
+        raw,
+    )
+    if match_plist:
+        return f"https://www.youtube.com/playlist?list={match_plist.group(1)}"
+
+    # 2. Check for playlist parameter (list=PL...) inside watch or youtu.be URL
+    match_list_param = re.search(r"[?&]list=([a-zA-Z0-9_-]+)", raw)
+    plist_id = match_list_param.group(1) if match_list_param else None
+
+    # 3. Full YouTube watch, youtu.be, shorts, live, or embed URL with video ID
     match_full = re.search(
         r"https?://(?:www\.|m\.)?(?:youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})|youtu\.be/([a-zA-Z0-9_-]{11})|youtube\.com/shorts/([a-zA-Z0-9_-]{11})|youtube\.com/live/([a-zA-Z0-9_-]{11})|youtube\.com/embed/([a-zA-Z0-9_-]{11}))",
         raw,
@@ -128,27 +142,26 @@ def normalize_youtube_url(text: str) -> Optional[str]:
             or match_full.group(4)
             or match_full.group(5)
         )
+        # If it belongs to a true user/channel playlist (not radio mix RD... or top list TL...), treat as playlist
+        if plist_id and not plist_id.startswith("RD") and not plist_id.startswith("TL"):
+            return f"https://www.youtube.com/playlist?list={plist_id}"
         return f"https://www.youtube.com/watch?v={vid}"
 
-    # 2. Playlist URL
-    match_plist = re.search(
-        r"(https?://(?:www\.|m\.)?youtube\.com/playlist\?list=[a-zA-Z0-9_-]+)",
-        raw,
-    )
-    if match_plist:
-        return match_plist.group(1)
+    # 4. Standalone playlist query: 'list=PL...'
+    if plist_id and not plist_id.startswith("RD"):
+        return f"https://www.youtube.com/playlist?list={plist_id}"
 
-    # 3. Query fragment: 'v=UQyh7QIVaDU' or 'watch?v=UQyh7QIVaDU'
+    # 5. Query fragment: 'v=UQyh7QIVaDU' or 'watch?v=UQyh7QIVaDU'
     match_query = re.search(r"(?:watch\?)?v=([a-zA-Z0-9_-]{11})", raw)
     if match_query:
         return f"https://www.youtube.com/watch?v={match_query.group(1)}"
 
-    # 4. Raw 11-character video ID alone (e.g. 'UQyh7QIVaDU')
+    # 6. Raw 11-character video ID alone (e.g. 'UQyh7QIVaDU')
     match_raw_id = re.match(r"^[a-zA-Z0-9_-]{11}$", raw)
     if match_raw_id:
         return f"https://www.youtube.com/watch?v={raw}"
 
-    # 5. General web link fallback
+    # 7. General web link fallback
     match_gen = re.search(r"(https?://[^\s]+)", raw)
     if match_gen:
         return match_gen.group(1)
@@ -307,14 +320,16 @@ def get_android_download_dir() -> Path:
 
 
 def scan_media_file(filepath: Path):
-    """Notify Android's MediaScannerConnection so the file appears in Gallery/Music players."""
+    """Notify Android's MediaScannerConnection so the file appears or is removed from Gallery/Music players."""
     try:
-        from jnius import autoclass
-        PythonActivity = autoclass("org.kivy.android.PythonActivity")
-        MediaScannerConnection = autoclass("android.media.MediaScannerConnection")
-        ctx = PythonActivity.mActivity
-        MediaScannerConnection.scanFile(ctx, [str(filepath.resolve())], None, None)
-        print(f"[Android] MediaScannerConnection indexed: {filepath.name}")
+        if is_running_on_android():
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            MediaScannerConnection = autoclass("android.media.MediaScannerConnection")
+            ctx = PythonActivity.mActivity
+            if ctx:
+                MediaScannerConnection.scanFile(ctx, [str(filepath.resolve())], None, None)
+                print(f"[Android] MediaScannerConnection synced: {filepath.name}")
     except Exception as e:
         print(f"[Android] MediaScanner notice: {e}")
 
@@ -367,15 +382,68 @@ def open_media_file(filepath: Path):
 
 
 def delete_media_file(filepath: Path) -> bool:
-    """Delete a media file from storage and update Android MediaStore."""
+    """
+    Robustly delete a media file from Android/desktop storage.
+    Bypasses Android FUSE/scoped storage permission blocks by combining:
+      1. Java java.io.File(path).delete() via PyJnius
+      2. Android ContentResolver / MediaStore deletion
+      3. Python os.remove / filepath.unlink()
+    """
+    path_str = str(filepath.resolve())
+    deleted = False
+
+    # 1. Java File.delete() via PyJnius (Most reliable on Android 10-15 FUSE storage)
+    if is_running_on_android():
+        try:
+            from jnius import autoclass
+            File = autoclass("java.io.File")
+            jfile = File(path_str)
+            if jfile.exists():
+                deleted = bool(jfile.delete())
+                print(f"[DeleteMedia] PyJnius File.delete result: {deleted}")
+        except Exception as je:
+            print(f"[DeleteMedia] PyJnius File.delete notice: {je}")
+
+    # 2. Python standard os.remove & unlink
+    if not deleted:
+        try:
+            if filepath.exists():
+                filepath.unlink(missing_ok=True)
+                deleted = True
+            elif os.path.exists(path_str):
+                os.remove(path_str)
+                deleted = True
+        except Exception as pe:
+            print(f"[DeleteMedia] Python unlink notice: {pe}")
+
+    # 3. Android MediaStore ContentResolver deletion
+    if is_running_on_android():
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            activity = PythonActivity.mActivity
+            if activity:
+                MediaStore = autoclass("android.provider.MediaStore")
+                content_resolver = activity.getContentResolver()
+                files_uri = MediaStore.Files.getContentUri("external")
+                count = content_resolver.delete(files_uri, "_data = ?", [path_str])
+                if count and count > 0:
+                    deleted = True
+                    print(f"[DeleteMedia] MediaStore deleted records: {count}")
+        except Exception as me:
+            print(f"[DeleteMedia] MediaStore notice: {me}")
+
+    # 4. Fallback verification: Check if file truly no longer exists
+    if not filepath.exists() and not os.path.exists(path_str):
+        deleted = True
+
+    # Sync MediaStore gallery index
     try:
-        if filepath.exists():
-            filepath.unlink()
-            scan_media_file(filepath)
-            return True
-    except Exception as e:
-        print(f"[DeleteMedia] Error deleting file: {e}")
-    return False
+        scan_media_file(filepath)
+    except Exception:
+        pass
+
+    return deleted
 
 
 def embed_audio_metadata(audio_path: Path, title: str, uploader: str, thumbnail_url: Optional[str] = None):
@@ -697,16 +765,6 @@ if KIVY_AVAILABLE:
             self.nav_btn_home.bind(on_press=lambda ins: self.switch_tab("home"))
             nav_bar.add_widget(self.nav_btn_home)
 
-            self.nav_btn_downloads = Button(
-                text="DOWNLOADS",
-                font_size="12sp",
-                bold=True,
-                background_color=(0.09, 0.11, 0.16, 1.0),
-                color=(0.65, 0.70, 0.80, 1.0),
-            )
-            self.nav_btn_downloads.bind(on_press=lambda ins: self.switch_tab("downloads"))
-            nav_bar.add_widget(self.nav_btn_downloads)
-
             self.nav_btn_videos = Button(
                 text="VIDEOS",
                 font_size="12sp",
@@ -716,6 +774,16 @@ if KIVY_AVAILABLE:
             )
             self.nav_btn_videos.bind(on_press=lambda ins: self.switch_tab("videos"))
             nav_bar.add_widget(self.nav_btn_videos)
+
+            self.nav_btn_downloads = Button(
+                text="DOWNLOADS",
+                font_size="12sp",
+                bold=True,
+                background_color=(0.09, 0.11, 0.16, 1.0),
+                color=(0.65, 0.70, 0.80, 1.0),
+            )
+            self.nav_btn_downloads.bind(on_press=lambda ins: self.switch_tab("downloads"))
+            nav_bar.add_widget(self.nav_btn_downloads)
 
             return nav_bar
 
@@ -1108,7 +1176,7 @@ if KIVY_AVAILABLE:
             self.refresh_library()
 
         # -----------------------------------------------------------------
-        # View 3: Videos View (Recommended Videos Based on Downloads)
+        # View 3: Videos View (Search YouTube & Dynamic Trending Picks)
         # -----------------------------------------------------------------
         def build_videos_view(self) -> ScrollView:
             scroll = ScrollView(do_scroll_x=False, do_scroll_y=True)
@@ -1123,29 +1191,29 @@ if KIVY_AVAILABLE:
             # Header Card
             rec_header_card = StyledCard(
                 orientation="vertical",
-                padding=[dp(14), dp(12)],
-                spacing=dp(3),
+                padding=[dp(14), dp(10)],
+                spacing=dp(2),
                 size_hint_y=None,
-                height=dp(64),
+                height=dp(56),
                 bg_color=(0.09, 0.11, 0.17, 1.0),
             )
             rec_title = Label(
-                text="[b]Recommended Videos & Music[/b]",
+                text="[b]Discover & Search YouTube[/b]",
                 markup=True,
                 font_size="14sp",
                 color=(0.95, 0.95, 1.0, 1.0),
                 size_hint_y=None,
-                height=dp(22),
+                height=dp(20),
                 halign="left",
             )
             rec_title.bind(size=rec_title.setter("text_size"))
 
             rec_subtitle = Label(
-                text="Trending & recommended based on your recent downloads",
-                font_size="11sp",
+                text="Search any song, artist, video or tap category chips below",
+                font_size="10.5sp",
                 color=(0.65, 0.70, 0.80, 1.0),
                 size_hint_y=None,
-                height=dp(18),
+                height=dp(16),
                 halign="left",
             )
             rec_subtitle.bind(size=rec_subtitle.setter("text_size"))
@@ -1154,7 +1222,109 @@ if KIVY_AVAILABLE:
             rec_header_card.add_widget(rec_subtitle)
             content.add_widget(rec_header_card)
 
-            # Recommendations Container
+            # Search Box Card
+            search_card = StyledCard(
+                orientation="vertical",
+                padding=[dp(12), dp(10)],
+                spacing=dp(8),
+                size_hint_y=None,
+                height=dp(94),
+                bg_color=(0.09, 0.11, 0.17, 1.0),
+            )
+            self.video_search_input = TextInput(
+                hint_text="Search YouTube videos, songs, artists...",
+                multiline=False,
+                font_size="13sp",
+                size_hint_y=None,
+                height=dp(40),
+                background_color=(0.14, 0.16, 0.24, 1.0),
+                foreground_color=(1, 1, 1, 1),
+                cursor_color=(1, 0.75, 0, 1),
+                padding=[dp(10), dp(10)],
+            )
+            self.video_search_input.bind(on_text_validate=lambda ins: self.on_search_clicked())
+            search_card.add_widget(self.video_search_input)
+
+            # Search Action Buttons: [SEARCH] [CLEAR] [SHUFFLE]
+            btn_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(30))
+            self.search_btn = Button(
+                text="SEARCH",
+                font_size="11sp",
+                bold=True,
+                background_color=(1.0, 0.68, 0.0, 1.0),
+                color=(0.04, 0.05, 0.08, 1.0),
+            )
+            self.search_btn.bind(on_press=lambda ins: self.on_search_clicked())
+
+            clear_search_btn = Button(
+                text="CLEAR",
+                font_size="11sp",
+                bold=True,
+                background_color=(0.18, 0.20, 0.28, 1.0),
+                color=(0.80, 0.85, 0.95, 1.0),
+            )
+            clear_search_btn.bind(on_press=lambda ins: self.on_search_clear_clicked())
+
+            shuffle_btn = Button(
+                text="SHUFFLE",
+                font_size="11sp",
+                bold=True,
+                background_color=(0.18, 0.24, 0.38, 1.0),
+                color=(0.40, 0.85, 1.0, 1.0),
+            )
+            shuffle_btn.bind(on_press=lambda ins: self.on_shuffle_trending())
+
+            btn_row.add_widget(self.search_btn)
+            btn_row.add_widget(clear_search_btn)
+            btn_row.add_widget(shuffle_btn)
+            search_card.add_widget(btn_row)
+            content.add_widget(search_card)
+
+            # Category Chips
+            chip_scroll = ScrollView(do_scroll_x=True, do_scroll_y=False, size_hint_y=None, height=dp(34))
+            chip_box = BoxLayout(orientation="horizontal", spacing=dp(6), size_hint_x=None)
+            chip_box.bind(minimum_width=chip_box.setter("width"))
+
+            self.category_chips = {}
+            categories = [
+                ("TRENDING", "Trending Videos 2026"),
+                ("MUSIC", "Top Music Hits 2026"),
+                ("GAMING", "Trending Gaming Highlights"),
+                ("TECH", "Latest Tech & AI News"),
+                ("SHORTS", "Popular YouTube Shorts"),
+                ("LO-FI", "Relaxing LoFi Beats Chill"),
+            ]
+            for cat_name, cat_query in categories:
+                btn = Button(
+                    text=cat_name,
+                    font_size="10.5sp",
+                    bold=True,
+                    size_hint=(None, None),
+                    size=(dp(82), dp(32)),
+                    background_color=(0.13, 0.16, 0.23, 1.0),
+                    color=(0.75, 0.80, 0.90, 1.0),
+                )
+                btn.bind(on_press=lambda ins, q=cat_query, n=cat_name: self.on_category_chip_clicked(n, q))
+                self.category_chips[cat_name] = btn
+                chip_box.add_widget(btn)
+
+            chip_scroll.add_widget(chip_box)
+            content.add_widget(chip_scroll)
+
+            # Results Section Title
+            self.results_header_lbl = Label(
+                text="[b]Trending & Recommended[/b]",
+                markup=True,
+                font_size="13sp",
+                color=(0.95, 0.95, 1.0, 1.0),
+                size_hint_y=None,
+                height=dp(22),
+                halign="left",
+            )
+            self.results_header_lbl.bind(size=self.results_header_lbl.setter("text_size"))
+            content.add_widget(self.results_header_lbl)
+
+            # Recommendations & Search Results Container
             self.recommendations_container = BoxLayout(
                 orientation="vertical",
                 spacing=dp(10),
@@ -1167,31 +1337,231 @@ if KIVY_AVAILABLE:
             return scroll
 
         # -----------------------------------------------------------------
-        # Populate Recommendations Logic
+        # Videos Search & Recommendation Helpers
         # -----------------------------------------------------------------
-        @mainthread
-        def populate_recommendations(self):
-            """Generate curated and dynamic recommendations based on previously downloaded files."""
+        def on_search_clicked(self):
+            """Execute in-app YouTube search."""
+            query = self.video_search_input.text.strip()
+            if not query:
+                return
+            self.search_youtube(query)
+
+        def on_search_clear_clicked(self):
+            """Reset search input and restore default trending picks."""
+            self.video_search_input.text = ""
+            for btn in self.category_chips.values():
+                btn.background_color = (0.13, 0.16, 0.23, 1.0)
+                btn.color = (0.75, 0.80, 0.90, 1.0)
+            self.populate_recommendations()
+
+        def on_category_chip_clicked(self, cat_name: str, cat_query: str):
+            """Filter by selected category chip."""
+            for name, btn in self.category_chips.items():
+                if name == cat_name:
+                    btn.background_color = (0.20, 0.28, 0.44, 1.0)
+                    btn.color = (1.0, 0.75, 0.0, 1.0)
+                else:
+                    btn.background_color = (0.13, 0.16, 0.23, 1.0)
+                    btn.color = (0.75, 0.80, 0.90, 1.0)
+            self.video_search_input.text = cat_query
+            self.search_youtube(cat_query, section_title=f"{cat_name} Picks")
+
+        def on_shuffle_trending(self):
+            """Shuffle random popular topic and search instantly."""
+            import random
+            topics = [
+                "Trending Bollywood Songs",
+                "Top Electronic Dance Music",
+                "Viral YouTube Shorts",
+                "AI Animation Filmmaking",
+                "Python Coding Projects",
+                "Best LoFi Study Beats",
+                "Grand Theft Auto 6 Highlights",
+                "NoCopyrightSounds Mix",
+            ]
+            picked = random.choice(topics)
+            self.video_search_input.text = picked
+            self.search_youtube(picked, section_title="Shuffled Picks")
+
+        def search_youtube(self, query: str, section_title: Optional[str] = None):
+            """Search YouTube via yt-dlp flat extraction without requiring API keys."""
+            title = section_title or f"Results for: {query[:25]}"
+            self.results_header_lbl.text = f"[b]{title}[/b]"
             self.recommendations_container.clear_widgets()
 
-            # Analyze downloaded files to find context keywords
-            target_dir = get_android_download_dir()
-            past_titles = []
-            if target_dir.exists():
-                for f in target_dir.glob("*.*"):
-                    if f.suffix.lower() in (".mp4", ".mp3", ".m4a", ".webm"):
-                        past_titles.append(f.stem.lower())
+            # Loading indicator
+            loading_card = StyledCard(
+                orientation="vertical",
+                padding=[dp(16), dp(16)],
+                spacing=dp(6),
+                size_hint_y=None,
+                height=dp(70),
+                bg_color=(0.08, 0.10, 0.15, 1.0),
+            )
+            loading_lbl = Label(
+                text=f"Searching YouTube for \"{query[:28]}\"...\nPlease wait.",
+                font_size="12sp",
+                color=(1.0, 0.75, 0.0, 1.0),
+                halign="center",
+            )
+            loading_lbl.bind(size=loading_lbl.setter("text_size"))
+            loading_card.add_widget(loading_lbl)
+            self.recommendations_container.add_widget(loading_card)
 
-            # Curated catalog of high-interest videos across categories
+            def worker():
+                results = []
+                try:
+                    import yt_dlp
+                    safe_logger = AndroidYTDLLogger()
+                    ydl_opts = {
+                        "extract_flat": True,
+                        "skip_download": True,
+                        "logger": safe_logger,
+                        "quiet": True,
+                        "no_warnings": True,
+                        "socket_timeout": 15,
+                    }
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        res = ydl.extract_info(f"ytsearch10:{query}", download=False)
+                        if res and "entries" in res:
+                            for entry in res["entries"]:
+                                if not entry:
+                                    continue
+                                vid_id = entry.get("id")
+                                vid_title = entry.get("title") or "YouTube Video"
+                                vid_uploader = entry.get("uploader") or entry.get("channel") or "YouTube"
+                                dur_sec = entry.get("duration")
+                                vid_duration = format_duration(dur_sec) if dur_sec else "Video"
+                                vid_thumb = entry.get("thumbnail") or (
+                                    f"https://i.ytimg.com/vi/{vid_id}/mqdefault.jpg" if vid_id else ""
+                                )
+                                vid_url = entry.get("url") or entry.get("webpage_url") or (
+                                    f"https://www.youtube.com/watch?v={vid_id}" if vid_id else ""
+                                )
+                                results.append({
+                                    "title": vid_title,
+                                    "channel": vid_uploader,
+                                    "duration": vid_duration,
+                                    "url": vid_url,
+                                    "thumb": vid_thumb,
+                                    "category": "YouTube",
+                                })
+                except Exception as e:
+                    print(f"[Search] YouTube search error: {e}")
+
+                Clock.schedule_once(lambda dt, r=results, q=query: self.render_video_results(r, q))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        @mainthread
+        def render_video_results(self, results: List[Dict[str, Any]], query: str):
+            """Display live YouTube search results."""
+            self.recommendations_container.clear_widgets()
+            if not results:
+                empty_card = StyledCard(
+                    orientation="vertical",
+                    padding=[dp(16), dp(16)],
+                    spacing=dp(6),
+                    size_hint_y=None,
+                    height=dp(80),
+                    bg_color=(0.08, 0.10, 0.15, 1.0),
+                )
+                empty_lbl = Label(
+                    text=f"No results found for \"{query[:25]}\".\nCheck connection or try another search term.",
+                    font_size="11.5sp",
+                    color=(0.70, 0.75, 0.85, 1.0),
+                    halign="center",
+                )
+                empty_lbl.bind(size=empty_lbl.setter("text_size"))
+                empty_card.add_widget(empty_lbl)
+                self.recommendations_container.add_widget(empty_card)
+                return
+
+            for item in results:
+                self.add_video_result_card(item)
+
+        def add_video_result_card(self, item: Dict[str, Any]):
+            """Create a video recommendation card with safe thumbnail and 1-tap GET button."""
+            card = StyledCard(
+                orientation="horizontal",
+                padding=[dp(10), dp(8)],
+                spacing=dp(10),
+                size_hint_y=None,
+                height=dp(86),
+                bg_color=(0.10, 0.12, 0.18, 1.0),
+            )
+
+            # Thumbnail with safe error fallback to prevent red cross X
+            thumb_url = item.get("thumb") or ""
+            thumb = AsyncImage(
+                source=thumb_url,
+                size_hint=(None, None),
+                size=(dp(96), dp(62)),
+                allow_stretch=True,
+                keep_ratio=True,
+            )
+            def on_thumb_error(instance, *args):
+                for candidate in ("icon.png", "assets/logo.png"):
+                    if os.path.exists(candidate):
+                        instance.source = candidate
+                        break
+                instance.opacity = 0.6
+            thumb.bind(on_error=on_thumb_error)
+            card.add_widget(thumb)
+
+            # Info column
+            info_col = BoxLayout(orientation="vertical", spacing=dp(2), size_hint_x=1.0)
+            clean_t = safe_display_text(item.get("title", ""))
+            t_lbl = Label(
+                text=f"[b]{clean_t[:42]}[/b]",
+                markup=True,
+                font_size="11.5sp",
+                color=(0.95, 0.95, 1.0, 1.0),
+                halign="left",
+                valign="top",
+                size_hint_y=None,
+                height=dp(32),
+            )
+            t_lbl.bind(size=t_lbl.setter("text_size"))
+            info_col.add_widget(t_lbl)
+
+            channel_name = safe_display_text(item.get("channel", "YouTube"))
+            dur_str = item.get("duration", "Video")
+            meta_lbl = Label(
+                text=f"{dur_str} • {channel_name[:22]}",
+                font_size="10sp",
+                color=(0.65, 0.70, 0.82, 1.0),
+                halign="left",
+                valign="middle",
+                size_hint_y=None,
+                height=dp(16),
+            )
+            meta_lbl.bind(size=meta_lbl.setter("text_size"))
+            info_col.add_widget(meta_lbl)
+            card.add_widget(info_col)
+
+            # 1-Tap GET Button
+            dl_btn = Button(
+                text="GET",
+                font_size="11sp",
+                bold=True,
+                size_hint=(None, None),
+                size=(dp(54), dp(40)),
+                background_color=(1.0, 0.68, 0.0, 1.0),
+                color=(0.04, 0.05, 0.08, 1.0),
+            )
+            dl_btn.bind(on_press=lambda ins, u=item["url"]: self.load_recommended_video(u))
+            card.add_widget(dl_btn)
+
+            self.recommendations_container.add_widget(card)
+
+        @mainthread
+        def populate_recommendations(self):
+            """Display curated and shuffled trending videos with permanent working thumbnails."""
+            self.results_header_lbl.text = "[b]Trending & Recommended[/b]"
+            self.recommendations_container.clear_widgets()
+
             catalog = [
-                {
-                    "title": "1,000 Termites vs. House (Full Documentary)",
-                    "channel": "AntsCanada",
-                    "duration": "12:13",
-                    "url": "https://www.youtube.com/watch?v=UqmP868N59w",
-                    "thumb": "https://i.ytimg.com/vi/UqmP868N59w/mqdefault.jpg",
-                    "category": "Documentary",
-                },
                 {
                     "title": "Alan Walker - Faded (Official Music Video)",
                     "channel": "Alan Walker",
@@ -1206,106 +1576,53 @@ if KIVY_AVAILABLE:
                     "duration": "4:26:52",
                     "url": "https://www.youtube.com/watch?v=_uQrJ0TkZlc",
                     "thumb": "https://i.ytimg.com/vi/_uQrJ0TkZlc/mqdefault.jpg",
-                    "category": "Education & Coding",
+                    "category": "Coding & Tech",
                 },
                 {
-                    "title": "Relaxing Lofi Beats for Study & Focus",
-                    "channel": "Lofi Girl",
-                    "duration": "Live / Music",
-                    "url": "https://www.youtube.com/watch?v=jfKfPfyJRdk",
-                    "thumb": "https://i.ytimg.com/vi/jfKfPfyJRdk/mqdefault.jpg",
-                    "category": "Music Lo-Fi",
+                    "title": "1,000 Termites vs. House (Full Documentary)",
+                    "channel": "AntsCanada",
+                    "duration": "12:13",
+                    "url": "https://www.youtube.com/watch?v=UqmP868N59w",
+                    "thumb": "https://i.ytimg.com/vi/UqmP868N59w/mqdefault.jpg",
+                    "category": "Documentary",
+                },
+                {
+                    "title": "Alan Walker - The Spectre (NCS Official)",
+                    "channel": "NoCopyrightSounds",
+                    "duration": "3:13",
+                    "url": "https://www.youtube.com/watch?v=AOeY-nDp7hI",
+                    "thumb": "https://i.ytimg.com/vi/AOeY-nDp7hI/mqdefault.jpg",
+                    "category": "Gaming Music",
                 },
                 {
                     "title": "How to Create AI Movies & Animation with Free Tools",
                     "channel": "AI Creators",
                     "duration": "14:48",
-                    "url": "https://www.youtube.com/watch?v=tF4DML7FIWk",
-                    "thumb": "https://i.ytimg.com/vi/tF4DML7FIWk/mqdefault.jpg",
+                    "url": "https://www.youtube.com/watch?v=aircAruvnKk",
+                    "thumb": "https://i.ytimg.com/vi/aircAruvnKk/mqdefault.jpg",
                     "category": "Tech & AI",
                 },
                 {
-                    "title": "Best Royalty Free Gaming Music Mix (NCS)",
-                    "channel": "NoCopyrightSounds",
-                    "duration": "32:15",
-                    "url": "https://www.youtube.com/watch?v=7tNtU5X-q_0",
-                    "thumb": "https://i.ytimg.com/vi/7tNtU5X-q_0/mqdefault.jpg",
-                    "category": "Music Mix",
+                    "title": "Ed Sheeran - Shape of You (Official Music Video)",
+                    "channel": "Ed Sheeran",
+                    "duration": "4:23",
+                    "url": "https://www.youtube.com/watch?v=JGwWNGJdvx8",
+                    "thumb": "https://i.ytimg.com/vi/JGwWNGJdvx8/mqdefault.jpg",
+                    "category": "Pop Music",
                 },
             ]
 
-            # Render recommendation cards
+            import random
+            random.shuffle(catalog)
             for item in catalog:
-                card = StyledCard(
-                    orientation="horizontal",
-                    padding=[dp(10), dp(8)],
-                    spacing=dp(10),
-                    size_hint_y=None,
-                    height=dp(86),
-                    bg_color=(0.10, 0.12, 0.18, 1.0),
-                )
-
-                # Thumbnail image
-                thumb = AsyncImage(
-                    source=item["thumb"],
-                    size_hint=(None, None),
-                    size=(dp(96), dp(62)),
-                    allow_stretch=True,
-                    keep_ratio=True,
-                )
-                card.add_widget(thumb)
-
-                # Info column
-                info_col = BoxLayout(orientation="vertical", spacing=dp(2), size_hint_x=1.0)
-                clean_t = safe_display_text(item["title"])
-                t_lbl = Label(
-                    text=f"[b]{clean_t[:42]}[/b]",
-                    markup=True,
-                    font_size="11.5sp",
-                    color=(0.95, 0.95, 1.0, 1.0),
-                    halign="left",
-                    valign="top",
-                    size_hint_y=None,
-                    height=dp(32),
-                )
-                t_lbl.bind(size=t_lbl.setter("text_size"))
-                info_col.add_widget(t_lbl)
-
-                meta_lbl = Label(
-                    text=f"{item['duration']} • {item['category']}",
-                    font_size="10sp",
-                    color=(0.65, 0.70, 0.82, 1.0),
-                    halign="left",
-                    valign="middle",
-                    size_hint_y=None,
-                    height=dp(16),
-                )
-                meta_lbl.bind(size=meta_lbl.setter("text_size"))
-                info_col.add_widget(meta_lbl)
-
-                card.add_widget(info_col)
-
-                # 1-Tap Download Button
-                dl_btn = Button(
-                    text="GET",
-                    font_size="11sp",
-                    bold=True,
-                    size_hint=(None, None),
-                    size=(dp(54), dp(40)),
-                    background_color=(1.0, 0.68, 0.0, 1.0),
-                    color=(0.04, 0.05, 0.08, 1.0),
-                )
-                # Binds download button to load link into Home tab and trigger download
-                dl_btn.bind(on_press=lambda ins, u=item["url"]: self.load_recommended_video(u))
-                card.add_widget(dl_btn)
-
-                self.recommendations_container.add_widget(card)
+                self.add_video_result_card(item)
 
         def load_recommended_video(self, video_url: str):
-            """Load a video from recommendations into the Home tab."""
+            """Load a video from search/recommendations into Home tab with live preview."""
             self.url_input.text = video_url
             self.switch_tab("home")
-            self.update_status("[color=#FFB300]Loaded recommended video![/color] Tap DOWNLOAD NOW.", 0)
+            self.fetch_preview(video_url)
+            self.update_status("[color=#FFB300]Loaded from Videos![/color] Tap DOWNLOAD NOW.", 0)
 
         # -----------------------------------------------------------------
         # Clipboard Auto-Detect Logic
@@ -1355,6 +1672,7 @@ if KIVY_AVAILABLE:
             """Clear input, preview card, and reset status."""
             self.url_input.text = ""
             self.current_preview_url = ""
+            self.download_btn.text = "DOWNLOAD NOW"
             self.preview_card.height = 0
             self.preview_card.opacity = 0.0
             self.clipboard_banner.height = 0
@@ -1370,7 +1688,7 @@ if KIVY_AVAILABLE:
                 self.fetch_preview(normalized)
 
         def fetch_preview(self, url: str):
-            """Fetch video thumbnail and details in a background thread."""
+            """Fetch video or playlist thumbnail and details in a background thread."""
             def preview_worker():
                 try:
                     import yt_dlp
@@ -1389,7 +1707,7 @@ if KIVY_AVAILABLE:
                             return
 
                         is_playlist = info.get("_type") == "playlist" or "entries" in info
-                        raw_title = info.get("title") or "YouTube Video"
+                        raw_title = info.get("title") or "YouTube Media"
                         clean_title = safe_display_text(raw_title)
                         uploader = safe_display_text(info.get("uploader") or info.get("channel") or "YouTube")
                         thumb = info.get("thumbnail") or ""
@@ -1397,32 +1715,57 @@ if KIVY_AVAILABLE:
                         if is_playlist:
                             entries = list(info.get("entries") or [])
                             count = len(entries)
-                            meta_str = f"Playlist ({count} items) • {uploader}"
+                            meta_str = f"Playlist ({count} videos) • {uploader}"
                             if entries and not thumb:
-                                thumb = entries[0].get("thumbnail") or ""
+                                first_entry = entries[0]
+                                if first_entry:
+                                    thumb = first_entry.get("thumbnail") or (
+                                        f"https://i.ytimg.com/vi/{first_entry.get('id')}/mqdefault.jpg" if first_entry.get("id") else ""
+                                    )
+                            btn_text = f"DOWNLOAD PLAYLIST ({count} VIDEOS)" if count > 1 else "DOWNLOAD NOW"
                         else:
                             dur = format_duration(info.get("duration"))
                             meta_str = f"{dur} • {uploader}"
+                            btn_text = "DOWNLOAD NOW"
 
                         Clock.schedule_once(
-                            lambda dt, t=clean_title, m=meta_str, th=thumb: self.update_preview_ui(t, m, th)
+                            lambda dt, t=clean_title, m=meta_str, th=thumb, b=btn_text: self.update_preview_ui(t, m, th, b)
                         )
                 except Exception as e:
                     print(f"[Preview] Fetch notice: {e}")
                     Clock.schedule_once(
-                        lambda dt: self.update_preview_ui("YouTube Media", "Ready to download", "")
+                        lambda dt: self.update_preview_ui("YouTube Media", "Ready to download", "", "DOWNLOAD NOW")
                     )
 
             threading.Thread(target=preview_worker, daemon=True).start()
 
         @mainthread
-        def update_preview_ui(self, title: str, meta: str, thumb_url: str):
+        def update_preview_ui(self, title: str, meta: str, thumb_url: str, btn_text: str = "DOWNLOAD NOW"):
             """Update the preview card on the main Kivy UI thread."""
             clean_title = title if len(title) <= 55 else title[:52] + "..."
             self.preview_title.text = f"[b]{clean_title}[/b]"
             self.preview_meta.text = meta
+            self.download_btn.text = btn_text
+
+            # Bind safe thumbnail fallback so missing thumbnail never renders red cross
+            def on_preview_thumb_error(instance, *args):
+                for candidate in ("icon.png", "assets/logo.png"):
+                    if os.path.exists(candidate):
+                        instance.source = candidate
+                        break
+                instance.opacity = 0.6
+            self.preview_thumb.bind(on_error=on_preview_thumb_error)
+
             if thumb_url:
                 self.preview_thumb.source = thumb_url
+                self.preview_thumb.opacity = 1.0
+            else:
+                for candidate in ("icon.png", "assets/logo.png"):
+                    if os.path.exists(candidate):
+                        self.preview_thumb.source = candidate
+                        self.preview_thumb.opacity = 0.6
+                        break
+
             self.preview_card.height = dp(76)
             self.preview_card.opacity = 1.0
 
@@ -1601,7 +1944,7 @@ if KIVY_AVAILABLE:
                         background_color=(0.60, 0.12, 0.12, 1.0),
                         color=(1, 1, 1, 1),
                     )
-                    del_btn.bind(on_press=lambda ins, p=media_path: self.on_delete_clicked(p))
+                    del_btn.bind(on_press=lambda ins, p=media_path, r=row: self.on_delete_clicked(p, r))
                     row.add_widget(del_btn)
 
                     self.library_container.add_widget(row)
@@ -1609,11 +1952,25 @@ if KIVY_AVAILABLE:
             except Exception as e:
                 print(f"[Library] Refresh error: {e}")
 
-        def on_delete_clicked(self, file_path: Path):
-            """Delete file from device and refresh list."""
-            if delete_media_file(file_path):
-                self.refresh_library()
-                self.update_status(f"[color=#00E676]Deleted:[/color] {file_path.name[:30]}", 0)
+        def on_delete_clicked(self, file_path: Path, row_widget: Optional[Any] = None):
+            """Delete file from device and refresh list with instant visual feedback."""
+            # Immediate UI removal so user sees instant response
+            if row_widget and row_widget in self.library_container.children:
+                self.library_container.remove_widget(row_widget)
+
+            def async_delete():
+                success = delete_media_file(file_path)
+                Clock.schedule_once(lambda dt: self.refresh_library(), 0.15)
+                if success:
+                    Clock.schedule_once(
+                        lambda dt: self.update_status(f"[color=#00E676]Deleted:[/color] {file_path.name[:25]}", 0)
+                    )
+                else:
+                    Clock.schedule_once(
+                        lambda dt: self.update_status(f"[color=#FFB300]Removed from list:[/color] {file_path.name[:25]}", 0)
+                    )
+
+            threading.Thread(target=async_delete, daemon=True).start()
 
         # -----------------------------------------------------------------
         # Download Execution Logic (Strict Filename Truncation + Auto-Fallback)
@@ -1648,6 +2005,8 @@ if KIVY_AVAILABLE:
                         lambda dt: self.update_status("Resolving streams & metadata...", 12)
                     )
 
+                    current_item_meta = {"index": 1, "total": 1, "title": "Video"}
+
                     # Progress callback to animate Kivy ProgressBar and Android Notification Bar
                     def progress_hook(d):
                         if d.get("status") == "downloading":
@@ -1657,17 +2016,29 @@ if KIVY_AVAILABLE:
                                 pct = int((downloaded / total) * 100)
                                 speed = d.get("speed")
                                 speed_str = f" • {format_bytes(speed)}/s" if speed else ""
+                                tot = current_item_meta["total"]
+                                cur_i = current_item_meta["index"]
+                                cur_t = current_item_meta["title"]
+
+                                if tot > 1:
+                                    overall_pct = int(((cur_i - 1) / tot) * 100) + int(pct / tot)
+                                    status_msg = f"[{cur_i}/{tot}] {overall_pct}% ({pct}%) • {cur_t[:18]}...{speed_str}"
+                                    notif_pct = overall_pct
+                                else:
+                                    overall_pct = pct
+                                    status_msg = f"Downloading: {pct}%{speed_str}"
+                                    notif_pct = pct
+
                                 Clock.schedule_once(
-                                    lambda dt, p=pct, s=speed_str: self.update_status(
-                                        f"Downloading: {p}%{s}", p
-                                    )
+                                    lambda dt, msg=status_msg, p=overall_pct: self.update_status(msg, p)
                                 )
 
                                 # Update Android notification bar at throttled interval
                                 now = time.time()
                                 if (now - self.last_notif_time) > 1.2 or pct >= 99:
                                     self.last_notif_time = now
-                                    self.notification_manager.show_progress("MSK YTDL", pct, speed_str)
+                                    notif_title = f"[{cur_i}/{tot}] {cur_t[:30]}" if tot > 1 else f"Downloading: {cur_t[:30]}"
+                                    self.notification_manager.show_progress(notif_title, notif_pct, speed_str)
 
                         elif d.get("status") == "finished":
                             Clock.schedule_once(
@@ -1727,39 +2098,52 @@ if KIVY_AVAILABLE:
                             else:
                                 ydl_opts["format"] = "18/22/best[ext=mp4]/best/bestvideo*+bestaudio"
 
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        # Extract info first to check for playlists
-                        media_meta = ydl.extract_info(url, download=False)
-                        if not media_meta:
-                            raise RuntimeError("Could not retrieve media details.")
+                    # 1. Fast metadata extraction to inspect if target is a playlist
+                    flat_opts = dict(ydl_opts)
+                    flat_opts["extract_flat"] = True
+                    flat_opts["progress_hooks"] = []
+                    with yt_dlp.YoutubeDL(flat_opts) as flat_ydl:
+                        media_meta = flat_ydl.extract_info(url, download=False)
 
-                        is_playlist = media_meta.get("_type") == "playlist" or "entries" in media_meta
-                        entries = list(media_meta.get("entries") or []) if is_playlist else [media_meta]
-                        total_count = len(entries) if entries else 1
+                    if not media_meta:
+                        raise RuntimeError("Could not retrieve media details.")
 
-                        if is_playlist and total_count > 1:
-                            Clock.schedule_once(
-                                lambda dt, cnt=total_count: self.update_status(
-                                    f"[color=#FFB300]Playlist Detected:[/color] Downloading {cnt} videos...", 10
-                                )
+                    is_playlist = media_meta.get("_type") == "playlist" or "entries" in media_meta
+                    raw_entries = list(media_meta.get("entries") or []) if is_playlist else [media_meta]
+                    entries = [e for e in raw_entries if e]
+                    total_count = len(entries) if entries else 1
+
+                    current_item_meta["total"] = total_count
+
+                    if is_playlist and total_count > 1:
+                        Clock.schedule_once(
+                            lambda dt, cnt=total_count: self.update_status(
+                                f"[color=#FFB300]Playlist Detected:[/color] Starting download of {cnt} videos...", 5
                             )
+                        )
 
-                        saved_files: List[Path] = []
+                    saved_files: List[Path] = []
+                    skipped_count = 0
 
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         # Download items (handles both single video and multi-item playlist)
                         for idx, item in enumerate(entries, start=1):
                             item_title = item.get("title") or f"Item {idx}"
-                            item_url = item.get("url") or item.get("webpage_url") or (f"https://www.youtube.com/watch?v={item.get('id')}" if item.get('id') else url)
-                            item_thumb = item.get("thumbnail") or media_meta.get("thumbnail")
+                            current_item_meta["index"] = idx
+                            current_item_meta["title"] = item_title
+                            item_id = item.get("id")
+                            item_url = item.get("url") or item.get("webpage_url") or (f"https://www.youtube.com/watch?v={item_id}" if item_id else url)
+                            item_thumb = item.get("thumbnail") or (f"https://i.ytimg.com/vi/{item_id}/hqdefault.jpg" if item_id else None)
                             item_uploader = item.get("uploader") or item.get("channel") or media_meta.get("uploader") or "MSK YTDL"
 
                             if total_count > 1:
+                                overall_start_pct = int(((idx - 1) / total_count) * 100)
                                 Clock.schedule_once(
-                                    lambda dt, i=idx, tot=total_count, t=item_title: self.update_status(
-                                        f"Item {i}/{tot}: {t[:35]}...", int((i - 1) / tot * 100)
+                                    lambda dt, i=idx, tot=total_count, t=item_title, p=overall_start_pct: self.update_status(
+                                        f"Starting [{i}/{tot}]: {t[:28]}...", p
                                     )
                                 )
-                                self.notification_manager.show_progress(f"[{idx}/{total_count}] {item_title}", int((idx - 1) / total_count * 100))
+                                self.notification_manager.show_progress(f"[{idx}/{total_count}] {item_title}", overall_start_pct)
 
                             # Execute download with automatic fallback if filename too long occurs
                             try:
@@ -1772,6 +2156,15 @@ if KIVY_AVAILABLE:
                                     fallback_opts["outtmpl"] = str(target_dir / "%(id)s.%(ext)s")
                                     with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
                                         info = ydl_fb.extract_info(item_url, download=True)
+                                elif total_count > 1:
+                                    print(f"[Playlist] Skipping item #{idx} ({item_title}) due to: {dl_err}")
+                                    skipped_count += 1
+                                    Clock.schedule_once(
+                                        lambda dt, i=idx, tot=total_count: self.update_status(
+                                            f"[color=#FFA000]Skipped unplayable item {i}/{tot}[/color]", int((i / tot) * 100)
+                                        )
+                                    )
+                                    continue
                                 else:
                                     raise
 
@@ -1790,9 +2183,11 @@ if KIVY_AVAILABLE:
                                 if Path(prepared).exists():
                                     saved_path = Path(prepared)
                                 else:
-                                    candidates = list(target_dir.glob(f"*{info.get('id')}*"))
-                                    if candidates:
-                                        saved_path = candidates[0]
+                                    cand_id = info.get("id") or item_id
+                                    if cand_id:
+                                        candidates = list(target_dir.glob(f"*{cand_id}*"))
+                                        if candidates:
+                                            saved_path = candidates[0]
 
                             if saved_path and saved_path.exists():
                                 # Feature 5: Embed High-Quality Album Art & Tags for MP3/M4A
@@ -1806,14 +2201,13 @@ if KIVY_AVAILABLE:
                         # Download Complete Actions
                         if saved_files:
                             last_file = saved_files[-1]
-                            # Completion Notification
-                            self.notification_manager.show_finished("MSK YTDL", last_file.name)
+                            if total_count > 1:
+                                msg = f"[color=#00E676]Playlist Complete![/color] {len(saved_files)} of {total_count} saved."
+                                self.notification_manager.show_finished("MSK YTDL Playlist", f"{len(saved_files)} videos saved")
+                            else:
+                                msg = f"[color=#00E676]Done![/color] Saved: {last_file.name}"
+                                self.notification_manager.show_finished("MSK YTDL", last_file.name)
 
-                            msg = (
-                                f"[color=#00E676]Playlist Done![/color] {len(saved_files)} items saved."
-                                if total_count > 1
-                                else f"[color=#00E676]Done![/color] Saved: {last_file.name}"
-                            )
                             Clock.schedule_once(lambda dt, m=msg: self.update_status(m, 100))
                         else:
                             Clock.schedule_once(
