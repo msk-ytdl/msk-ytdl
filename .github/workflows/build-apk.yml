@@ -45,7 +45,8 @@ jobs:
 
       - name: Build Android APK with Buildozer
         run: |
-          buildozer android debug
+          set -o pipefail
+          buildozer -v android debug 2>&1 | tee buildozer.log
 
       - name: Upload APK artifact
         if: success()
@@ -55,11 +56,11 @@ jobs:
           path: bin/*.apk
           retention-days: 30
 
-      - name: Upload debug logs on failure
-        if: failure()
+      - name: Upload full build log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: buildozer-debug-logs
-          path: .buildozer/**/*.log
+          name: buildozer-full-log
+          path: buildozer.log
           if-no-files-found: ignore
           retention-days: 7

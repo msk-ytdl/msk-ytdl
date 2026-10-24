@@ -49,8 +49,8 @@ android.accept_sdk_license = True
 # (str) The Android arch to build for, choices: armeabi-v7a, arm64-v8a, x86, x86_64
 android.archs = arm64-v8a
 
-# (str) python-for-android branch to use (develop branch contains PR #3360 pip venv corruption fix)
-p4a.branch = develop
+# (str) python-for-android branch to use (master is the stable branch without broken experimental recipes)
+p4a.branch = master
 
 # (bool) enables Android auto backup feature (Android API >=23)
 android.allow_backup = True
