@@ -62,6 +62,35 @@ def find_system_ffmpeg_binaries() -> Tuple[Optional[Path], Optional[Path]]:
     return ffmpeg_path, ffprobe_path
 
 
+def find_upx_dir() -> Optional[Path]:
+    """
+    Search for upx.exe directory on the system (PATH, WinGet, Chocolatey, Scoop).
+    UPX significantly shrinks the final Windows executable size by 40-50%.
+    """
+    which_upx = shutil.which("upx")
+    if which_upx:
+        return Path(which_upx).resolve().parent
+
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    if local_app_data:
+        winget_dir = Path(local_app_data) / "Microsoft" / "WinGet" / "Packages"
+        if winget_dir.exists():
+            for exe in winget_dir.glob("**/upx.exe"):
+                return exe.resolve().parent
+
+    choco_bin = Path("C:/ProgramData/chocolatey/bin")
+    if (choco_bin / "upx.exe").exists():
+        return choco_bin
+
+    user_profile = os.environ.get("USERPROFILE", "")
+    if user_profile:
+        scoop_shims = Path(user_profile) / "scoop" / "shims"
+        if (scoop_shims / "upx.exe").exists():
+            return scoop_shims
+
+    return None
+
+
 def ensure_pyinstaller() -> bool:
     """Ensure PyInstaller is installed in the active environment."""
     try:
@@ -130,7 +159,7 @@ LEGAL & AUTHORIZED USE NOTICE:
 
 
 def build_executable(onefile: bool = False) -> bool:
-    """Run PyInstaller build."""
+    """Run PyInstaller build with aggressive size reduction and UPX compression."""
     entry_point = PROJECT_ROOT / "youtube_downloader" / "__main__.py"
     if not entry_point.exists():
         console.print(f"[bold red]Error: Entry point {entry_point} not found.[/bold red]")
@@ -154,9 +183,28 @@ def build_executable(onefile: bool = False) -> bool:
         "--console",
     ]
 
-    web_dir = PROJECT_ROOT / "youtube_downloader" / "web"
-    if web_dir.exists():
-        cmd.extend(["--add-data", f"{web_dir};youtube_downloader/web"])
+    # Exclude unused heavy standard modules to minimize executable size
+    excluded_modules = [
+        "tkinter",
+        "unittest",
+        "test",
+        "pydoc",
+        "xmlrpc",
+        "http.server",
+        "turtle",
+        "turtledemo",
+        "idlelib",
+    ]
+    for mod in excluded_modules:
+        cmd.extend(["--exclude-module", mod])
+
+    # Enable UPX compression if found
+    upx_dir = find_upx_dir()
+    if upx_dir:
+        console.print(f"[green]Enabling UPX binary compression from:[/green] {upx_dir}")
+        cmd.extend(["--upx-dir", str(upx_dir), "--upx-exclude", "vcruntime140.dll"])
+    else:
+        console.print("[yellow]Notice: UPX not found. Building without UPX binary compression.[/yellow]")
 
     version_file = PROJECT_ROOT / "windows_version_info.txt"
     if version_file.exists():
@@ -245,7 +293,7 @@ def package_distribution(onefile: bool = False) -> Optional[Path]:
     if ZIP_OUTPUT.exists():
         ZIP_OUTPUT.unlink()
 
-    with zipfile.ZipFile(ZIP_OUTPUT, "w", zipfile.ZIP_DEFLATED) as zip_file:
+    with zipfile.ZipFile(ZIP_OUTPUT, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zip_file:
         for root, _, files in os.walk(PORTABLE_DIR):
             for file in files:
                 file_path = Path(root) / file

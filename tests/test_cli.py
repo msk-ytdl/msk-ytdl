@@ -251,16 +251,4 @@ class TestMainExecution:
         assert exit_code == 0
         mock_build_main.assert_called_once()
 
-    def test_web_arg_parsing(self):
-        parser = build_arg_parser()
-        args = parser.parse_args(["--web", "--port", "9000"])
-        assert args.web is True
-        assert args.port == 9000
-
-    @patch("youtube_downloader.web_server.run_web_server")
-    def test_main_web_execution(self, mock_run_web):
-        exit_code = main(["--web", "--port", "8899"])
-        assert exit_code == 0
-        mock_run_web.assert_called_once_with(port=8899)
-
 

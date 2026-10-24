@@ -212,6 +212,10 @@ class YoutubeDownloader:
             "no_warnings": not self.debug,
             "cachedir": False,  # Prevent stale cache issues
             "js_runtimes": {"deno": {}, "node": {}},
+            # Speed & throughput optimizations (multi-connection fragments & 1MB buffer)
+            "concurrent_fragment_downloads": 6,
+            "buffersize": 1048576,
+            "http_chunk_size": 10485760,
         }
 
         # Configure FFmpeg location if bundled or found

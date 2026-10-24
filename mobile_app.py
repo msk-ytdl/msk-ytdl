@@ -647,6 +647,10 @@ if KIVY_AVAILABLE:
                         "no_warnings": True,
                         "restrictfilenames": False,
                         "no_color": True,
+                        # Speed & throughput optimizations
+                        "concurrent_fragment_downloads": 6,
+                        "buffersize": 1048576,
+                        "http_chunk_size": 10485760,
                         # Request android and web player clients to ensure YouTube serves
                         # progressive formats (format 18 360p / format 22 720p) that have
                         # audio and video in a single stream without requiring FFmpeg muxing.

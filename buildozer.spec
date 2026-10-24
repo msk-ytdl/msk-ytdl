@@ -16,17 +16,19 @@ source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,json,txt,xml
 
 # (list) List of directories to exclude from the APK
-source.exclude_dirs = tests, bin, .venv, venv, .git, .github, build, dist, msk-ytdl-site, .pytest_cache, __pycache__
+source.exclude_dirs = tests, bin, .venv, venv, .git, .github, build, dist, msk-ytdl-site, .pytest_cache, __pycache__, docs, scripts, .agents
 
-# (list) List of inclusions using pattern matching
-#source.include_patterns = assets/*,images/*.png
+# (list) List of exclusions using pattern matching (keeps APK lean and removes non-runtime files)
+source.exclude_patterns = *.spec, *.cer, *.bat, *.sh, *.ps1, *.md, *.p12, *.keystore, ci-constraints.txt, pytest.ini, requirements.txt, windows_version_info.txt, build_exe.py, pyproject.toml
 
 # (str) Application versioning (method 1)
 version = 1.0.0
 
-# (list) Application requirements
-# comma separated e.g. requirements = sqlite3,kivy
-requirements = python3,kivy,openssl,sqlite3,requests,urllib3,certifi,idna,charset-normalizer,yt-dlp,yt-dlp-ejs,rich,mutagen,pyjnius
+# (list) Application requirements (clean minimal runtime: removed unused requests, urllib3, rich, idna, charset-normalizer, sqlite3)
+requirements = python3,kivy,openssl,certifi,yt-dlp,yt-dlp-ejs,mutagen,pyjnius
+
+# (int) Strip debug symbols from binaries (.so files) using Android NDK llvm-strip (1 = standard, 2 = aggressive)
+android.strip = 2
 
 # (str) Supported orientation (one of landscape, sensorLandscape, portrait or all)
 orientation = portrait

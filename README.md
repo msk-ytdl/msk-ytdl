@@ -20,9 +20,10 @@ If access to media is restricted, please use the platform's authorized website, 
 
 ## Key Features
 
-* **Triple Interface:** Polished interactive terminal menu with 15 numbered options, modern MSK YTDL browser web application, and direct CLI flags for power users and automation.
-* **Local MSK YTDL Web App:** Built-in web server (`run_web.bat` or `--web`) that launches a responsive dark-mode browser UI accessible on your PC (`http://localhost:8899`) or across your local Wi-Fi on Android phones and tablets!
-* **Standalone Windows Executable & Portable Packager:** 1-click builder (`build_exe.bat` or Option 14) that compiles a standalone `MSK-YTDL.exe` signed by **MSK Software Solutions**, bundles `ffmpeg.exe` and `ffprobe.exe`, and generates a ready-to-share `MSK-YTDL-Windows-x64.zip` file for friends (no Python or FFmpeg installation needed on their PC).
+* **Two Primary Platforms:** 
+  1. **Windows CLI:** Polished interactive terminal menu with 14 numbered options and direct command-line arguments for power users, scripts, and automation.
+  2. **Android Mobile APK:** Dedicated touchscreen APK with Android "Share from YouTube" intent handler and mobile storage integration.
+* **Standalone Windows Executable & Portable Packager:** 1-click builder (`build_exe.bat` or Option 14) that compiles a standalone `MSK-YTDL.exe` compressed with UPX, signed by **MSK Software Solutions**, bundles `ffmpeg.exe` and `ffprobe.exe`, and generates a ready-to-share `MSK-YTDL-Windows-x64.zip` file for friends (no Python or FFmpeg installation needed on their PC).
 * **Automated Multi-Platform Release CI/CD:** Automated GitHub Actions workflow (`.github/workflows/release.yml`) that compiles and signs both Android `.apk` (v1/v2/v3 scheme) and Windows `.exe` / `.zip`, automatically publishing a GitHub Release with download assets on every push.
 * **Full Playlist Downloads:** Download complete YouTube playlists as video or MP3 audio with automatic folder organization (`<Playlist Title>/`), configurable item ranges (`--playlist-start`, `--playlist-end`), or custom item selectors (`--playlist-items '1,3-5,8'`).
 * **Multi-Video Batch Downloading:** Process multiple individual video URLs in a single run with per-item error isolation via CLI arguments (`--urls ...`) or from a plain text file (`--batch-file urls.txt`).
@@ -258,16 +259,6 @@ run.bat --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" --output-dir "D:/Arc
 #### O. Build Standalone Windows Executable & Shareable ZIP Archive
 ```powershell
 run.bat --package-windows
-```
-
-#### P. Launch Local Web UI (MSK YTDL Mobile/Browser App)
-Start the built-in local server and open your browser at `http://localhost:8899` (or open the displayed Wi-Fi URL on your Android phone/tablet):
-```powershell
-# Double-click or run the batch launcher:
-run_web.bat
-
-# Or launch via Python CLI flags:
-run.bat --web --port 8899
 ```
 
 ---

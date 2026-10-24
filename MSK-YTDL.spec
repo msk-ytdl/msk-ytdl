@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('D:/Sumit/projects/VideMate-Clone/msk-ytdl/youtube_downloader/web', 'youtube_downloader/web')]
+datas = []
 binaries = []
 hiddenimports = ['youtube_downloader', 'mutagen', 'urllib3']
 tmp_ret = collect_all('yt_dlp')
@@ -21,7 +21,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['tkinter', 'unittest', 'test', 'pydoc', 'xmlrpc', 'http.server', 'turtle', 'turtledemo', 'idlelib'],
     noarchive=False,
     optimize=0,
 )
@@ -30,13 +30,16 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
     [],
-    exclude_binaries=True,
     name='MSK-YTDL',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
+    upx_exclude=['vcruntime140.dll'],
+    runtime_tmpdir=None,
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -44,13 +47,4 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     version='D:/Sumit/projects/VideMate-Clone/msk-ytdl/windows_version_info.txt',
-)
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name='MSK-YTDL',
 )
