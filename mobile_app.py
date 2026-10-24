@@ -319,14 +319,14 @@ if KIVY_AVAILABLE:
                 bg_color=(0.09, 0.11, 0.17, 1.0),
             )
             brand_label = Label(
-                text="[b][color=#FFB300]MSK[/color] YTDL[/b]",
+                text="[b][color=#FFB300]MSK[/color] YTDL[/b]  [size=13sp][color=#00E676]v1.0.1[/color][/size]",
                 markup=True,
                 font_size="24sp",
                 size_hint_y=None,
                 height=dp(32),
             )
             tagline = Label(
-                text="YouTube Downloader by MSK Software Solutions",
+                text="MSK YTDL v1.0.1 • by MSK Software Solutions",
                 font_size="12sp",
                 color=(0.7, 0.75, 0.85, 1.0),
                 size_hint_y=None,

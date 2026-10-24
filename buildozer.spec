@@ -22,7 +22,7 @@ source.exclude_dirs = tests, bin, .venv, venv, .git, .github, build, dist, msk-y
 source.exclude_patterns = *.spec, *.cer, *.bat, *.sh, *.ps1, *.md, *.p12, *.keystore, ci-constraints.txt, pytest.ini, requirements.txt, windows_version_info.txt, build_exe.py, pyproject.toml
 
 # (str) Application versioning (method 1)
-version = 1.0.0
+version = 1.0.1
 
 # (list) Application requirements (clean minimal runtime: removed unused requests, urllib3, rich, idna, charset-normalizer, sqlite3)
 requirements = python3,kivy,openssl,certifi,yt-dlp,yt-dlp-ejs,mutagen,pyjnius

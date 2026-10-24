@@ -46,6 +46,16 @@ jobs:
           python -m pip install cython==0.29.36
           python -m pip install --upgrade buildozer
 
+      - name: Inject Dynamic Version into buildozer.spec
+        run: |
+          BASE_VER=$(grep -E '^version\s*=\s*' pyproject.toml | head -n 1 | sed -E 's/version\s*=\s*"(.*)"/\1/')
+          if [ -z "$BASE_VER" ]; then
+            BASE_VER="1.0.1"
+          fi
+          FULL_VER="${BASE_VER}.${{ github.run_number }}"
+          sed -i "s/^version = .*/version = ${FULL_VER}/" buildozer.spec
+          echo "Injected version ${FULL_VER} into buildozer.spec"
+
       - name: Build Android APK with Buildozer
         run: |
           set -o pipefail
