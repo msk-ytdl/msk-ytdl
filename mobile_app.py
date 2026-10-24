@@ -165,6 +165,25 @@ def format_bytes(num_bytes: Optional[float]) -> str:
     return f"{num_bytes:.1f} TB"
 
 
+def get_app_version() -> str:
+    """Dynamically retrieve version from Android PackageManager or fallback."""
+    try:
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        activity = PythonActivity.mActivity
+        if activity:
+            package_info = activity.getPackageManager().getPackageInfo(activity.getPackageName(), 0)
+            if package_info and package_info.versionName:
+                return str(package_info.versionName)
+    except Exception:
+        pass
+    try:
+        import youtube_downloader
+        return getattr(youtube_downloader, "__version__", "1.0.1")
+    except Exception:
+        return "1.0.1"
+
+
 def request_android_permissions():
     """Request runtime storage permissions on Android (API 21 through 35)."""
     try:
@@ -318,15 +337,16 @@ if KIVY_AVAILABLE:
                 height=dp(80),
                 bg_color=(0.09, 0.11, 0.17, 1.0),
             )
+            app_version = get_app_version()
             brand_label = Label(
-                text="[b][color=#FFB300]MSK[/color] YTDL[/b]  [size=13sp][color=#00E676]v1.0.1[/color][/size]",
+                text=f"[b][color=#FFB300]MSK[/color] YTDL[/b]  [size=13sp][color=#00E676]v{app_version}[/color][/size]",
                 markup=True,
                 font_size="24sp",
                 size_hint_y=None,
                 height=dp(32),
             )
             tagline = Label(
-                text="MSK YTDL v1.0.1 • by MSK Software Solutions",
+                text=f"MSK YTDL v{app_version} • by MSK Software Solutions",
                 font_size="12sp",
                 color=(0.7, 0.75, 0.85, 1.0),
                 size_hint_y=None,

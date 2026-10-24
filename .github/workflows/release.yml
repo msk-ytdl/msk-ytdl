@@ -52,21 +52,23 @@ jobs:
           if [ -z "$BASE_VER" ]; then
             BASE_VER="1.0.1"
           fi
-          sed -i "s/^version = .*/version = ${BASE_VER}/" buildozer.spec
+          FULL_VER="${BASE_VER}.${{ github.run_number }}"
+          sed -i "s/^version = .*/version = ${FULL_VER}/" buildozer.spec
           sed -i "s/^android.numeric_version = .*/android.numeric_version = ${{ github.run_number }}/" buildozer.spec
-          echo "Injected version ${BASE_VER} and android.numeric_version ${{ github.run_number }} into buildozer.spec"
+          echo "Injected version ${FULL_VER} and android.numeric_version ${{ github.run_number }} into buildozer.spec"
           grep -E "version" buildozer.spec
 
       - name: Build Android APK with Buildozer
         run: |
           set -o pipefail
+          rm -rf bin/*
           buildozer -v android debug 2>&1 | tee buildozer.log
 
       - name: Align and Sign APK with MSK Software Solutions Release Keystore
         run: |
           set -e
           echo "Locating built APK in bin/..."
-          RAW_APK=$(ls bin/*.apk | head -n 1)
+          RAW_APK=$(ls bin/*debug.apk bin/*aligned.apk bin/*.apk 2>/dev/null | head -n 1)
           if [ -z "$RAW_APK" ] || [ ! -f "$RAW_APK" ]; then
             echo "Error: No APK found in bin/"
             exit 1
