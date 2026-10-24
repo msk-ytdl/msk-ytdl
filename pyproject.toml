@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "msk-ytdl"
+version = "1.0.0"
+description = "A reliable, production-quality Python CLI downloader for authorized YouTube videos"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "yt-dlp[default]>=2026.10.21",
+    "yt-dlp-ejs>=0.8.0",
+    "rich>=13.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.14",
+]
+
+[project.scripts]
+msk-ytdl = "youtube_downloader.cli:main"
+yt-downloader = "youtube_downloader.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["youtube_downloader*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
