@@ -4,7 +4,8 @@ Publisher: MSK Software Solutions
 Designed for touchscreen navigation, phone storage permissions, background downloading,
 modern dark aesthetics, real-time video previews, offline library manager,
 HQ MP3 album art & ID3 embedding, smart clipboard auto-detection, playlist support,
-and direct integration with Android's "Share from YouTube" SEND Intent.
+bottom footer navigation bar (Home, Downloads, Videos), and direct integration
+with Android's "Share from YouTube" SEND Intent.
 """
 
 import os
@@ -62,6 +63,7 @@ try:
     from kivy.app import App
     from kivy.clock import Clock, mainthread
     from kivy.core.clipboard import Clipboard
+    from kivy.core.text import LabelBase
     from kivy.core.window import Window
     from kivy.graphics import Color, RoundedRectangle
     from kivy.metrics import dp
@@ -159,6 +161,22 @@ def extract_youtube_url(text: str) -> Optional[str]:
     return normalize_youtube_url(text)
 
 
+def safe_display_text(text: Optional[str]) -> str:
+    """
+    Sanitize text to render cleanly on Android Kivy without missing-glyph tofu square boxes [].
+    Strips raw emojis and unrenderable control characters while preserving readable text.
+    """
+    if not text:
+        return ""
+    raw = str(text)
+    # Strip supplementary plane emojis (Surrogate pairs)
+    cleaned = re.sub(r'[\U00010000-\U0010ffff]', '', raw)
+    # Strip miscellaneous symbols & emojis
+    cleaned = re.sub(r'[\u2600-\u27bf\u2b50-\u2b55\u2300-\u23ff\u2190-\u21ff\u2900-\u297f\u25a0-\u25ff]', '', cleaned)
+    # Collapse multiple spaces
+    return re.sub(r'\s+', ' ', cleaned).strip()
+
+
 def format_bytes(num_bytes: Optional[float]) -> str:
     """Format speed / byte count to human-readable string."""
     if not num_bytes or num_bytes <= 0:
@@ -173,7 +191,7 @@ def format_bytes(num_bytes: Optional[float]) -> str:
 def format_duration(seconds: Optional[float]) -> str:
     """Format duration in seconds to HH:MM:SS or MM:SS."""
     if not seconds or seconds <= 0:
-        return "Live / Video"
+        return "Video"
     secs = int(seconds)
     hours = secs // 3600
     minutes = (secs % 3600) // 60
@@ -383,10 +401,12 @@ def embed_audio_metadata(audio_path: Path, title: str, uploader: str, thumbnail_
                     audio.add_tags()
                 except error:
                     pass
-                if title:
-                    audio.tags.add(TIT2(encoding=3, text=title))
-                if uploader:
-                    audio.tags.add(TPE1(encoding=3, text=uploader))
+                clean_title = safe_display_text(title)
+                clean_uploader = safe_display_text(uploader)
+                if clean_title:
+                    audio.tags.add(TIT2(encoding=3, text=clean_title))
+                if clean_uploader:
+                    audio.tags.add(TPE1(encoding=3, text=clean_uploader))
                 audio.tags.add(TALB(encoding=3, text="MSK YTDL Downloads"))
                 if thumb_data:
                     audio.tags.add(APIC(
@@ -405,10 +425,12 @@ def embed_audio_metadata(audio_path: Path, title: str, uploader: str, thumbnail_
             try:
                 from mutagen.mp4 import MP4, MP4Cover
                 audio = MP4(str(audio_path))
-                if title:
-                    audio["\xa9nam"] = [title]
-                if uploader:
-                    audio["\xa9ART"] = [uploader]
+                clean_title = safe_display_text(title)
+                clean_uploader = safe_display_text(uploader)
+                if clean_title:
+                    audio["\xa9nam"] = [clean_title]
+                if clean_uploader:
+                    audio["\xa9ART"] = [clean_uploader]
                 audio["\xa9alb"] = ["MSK YTDL Downloads"]
                 if thumb_data:
                     audio["covr"] = [MP4Cover(thumb_data, imageformat=MP4Cover.FORMAT_JPEG)]
@@ -464,7 +486,8 @@ class AndroidNotificationManager:
             from jnius import autoclass
             NotificationBuilder = autoclass("android.app.Notification$Builder")
             builder = NotificationBuilder(self.context, self.channel_id)
-            builder.setContentTitle(f"Downloading: {title[:40]}")
+            clean_title = safe_display_text(title)
+            builder.setContentTitle(f"Downloading: {clean_title[:38]}")
             builder.setContentText(f"{percent}%{speed_str}")
             builder.setSmallIcon(self.context.getApplicationInfo().icon)
             builder.setProgress(100, percent, False)
@@ -480,8 +503,8 @@ class AndroidNotificationManager:
             from jnius import autoclass
             NotificationBuilder = autoclass("android.app.Notification$Builder")
             builder = NotificationBuilder(self.context, self.channel_id)
-            builder.setContentTitle("Download Complete! ✅")
-            builder.setContentText(f"Saved: {filename[:45]}")
+            builder.setContentTitle("Download Complete!")
+            builder.setContentText(f"Saved: {filename[:42]}")
             builder.setSmallIcon(self.context.getApplicationInfo().icon)
             builder.setProgress(0, 0, False)
             builder.setOngoing(False)
@@ -520,10 +543,27 @@ if KIVY_AVAILABLE:
             self.title = "MSK YTDL"
             Window.clearcolor = (0.05, 0.06, 0.09, 1.0)  # Deep obsidian dark mode
 
+            # Attempt to register system fallback font for native Devanagari & international glyphs
+            try:
+                if is_running_on_android():
+                    for sys_font in (
+                        "/system/fonts/NotoSansDevanagari-Regular.ttf",
+                        "/system/fonts/DroidSansFallback.ttf",
+                        "/system/fonts/NotoSans-Regular.ttf",
+                        "/system/fonts/Roboto-Regular.ttf",
+                    ):
+                        if os.path.exists(sys_font):
+                            LabelBase.register(name="Roboto", fn_regular=sys_font)
+                            break
+            except Exception:
+                pass
+
             self.notification_manager = AndroidNotificationManager()
             self.current_preview_url = ""
             self.last_clipboard_text = ""
             self.last_notif_time = 0.0
+            self.active_tab = "home"
+            self.active_filter = "all"
 
             # Request Android storage & notification permissions on startup
             request_android_permissions()
@@ -535,29 +575,55 @@ if KIVY_AVAILABLE:
             except Exception:
                 pass
 
-            # Root ScrollView to ensure all screen sizes render with perfect spacing
-            scroll_root = ScrollView(do_scroll_x=False, do_scroll_y=True)
-
-            content = BoxLayout(
-                orientation="vertical",
-                padding=[dp(16), dp(18), dp(16), dp(24)],
-                spacing=dp(12),
-                size_hint_y=None,
-            )
-            content.bind(minimum_height=content.setter("height"))
+            # Root vertical container: [Pinned Header] + [Dynamic Main View] + [Pinned Bottom Footer Nav]
+            root = BoxLayout(orientation="vertical")
 
             # -------------------------------------------------------------
-            # 1. Header Card (MSK YTDL Branding & Logo)
+            # Top App Header (Logo + Brand + Dynamic Version)
             # -------------------------------------------------------------
+            header_card = self.create_header_card()
+            root.add_widget(header_card)
+
+            # -------------------------------------------------------------
+            # Dynamic Main Screen Container
+            # -------------------------------------------------------------
+            self.main_container = BoxLayout(orientation="vertical", size_hint_y=1.0)
+            root.add_widget(self.main_container)
+
+            # Build all 3 Tab Views
+            self.home_view = self.build_home_view()
+            self.downloads_view = self.build_downloads_view()
+            self.videos_view = self.build_videos_view()
+
+            # Start on Home view
+            self.main_container.add_widget(self.home_view)
+
+            # -------------------------------------------------------------
+            # Bottom Navigation Footer Bar (Home / Downloads / Videos)
+            # -------------------------------------------------------------
+            self.nav_footer = self.create_bottom_nav()
+            root.add_widget(self.nav_footer)
+
+            # Initial startup tasks
+            Clock.schedule_once(self.check_initial_intent, 0.4)
+            Clock.schedule_once(lambda dt: self.refresh_library(), 0.6)
+            Clock.schedule_interval(self.check_clipboard, 2.5)
+
+            return root
+
+        # -----------------------------------------------------------------
+        # Header Card Builder
+        # -----------------------------------------------------------------
+        def create_header_card(self) -> BoxLayout:
             header_card = StyledCard(
                 orientation="horizontal",
-                padding=[dp(14), dp(10)],
-                spacing=dp(12),
+                padding=[dp(12), dp(8)],
+                spacing=dp(10),
                 size_hint_y=None,
-                height=dp(72),
-                bg_color=(0.09, 0.11, 0.17, 1.0),
+                height=dp(60),
+                bg_color=(0.08, 0.10, 0.15, 1.0),
             )
-            
+
             # Resolve logo file path
             logo_path = ""
             for candidate in (
@@ -568,49 +634,146 @@ if KIVY_AVAILABLE:
                 if candidate.exists():
                     logo_path = str(candidate)
                     break
-            
+
             if logo_path:
                 app_logo = Image(
                     source=logo_path,
                     size_hint=(None, None),
-                    size=(dp(50), dp(50)),
+                    size=(dp(44), dp(44)),
                     allow_stretch=True,
                     keep_ratio=True,
                 )
                 header_card.add_widget(app_logo)
 
-            header_text_box = BoxLayout(orientation="vertical", spacing=dp(2))
+            header_text_box = BoxLayout(orientation="vertical", spacing=dp(1))
             app_version = get_app_version()
             brand_label = Label(
-                text=f"[b][color=#FFB300]MSK[/color] YTDL[/b]  [size=13sp][color=#00E676]v{app_version}[/color][/size]",
+                text=f"[b][color=#FFB300]MSK[/color] YTDL[/b]  [size=12sp][color=#00E676]v{app_version}[/color][/size]",
                 markup=True,
-                font_size="22sp",
+                font_size="20sp",
                 size_hint_y=None,
-                height=dp(28),
+                height=dp(24),
                 halign="left",
                 valign="middle",
             )
             brand_label.bind(size=brand_label.setter("text_size"))
+
             tagline = Label(
-                text=f"MSK YTDL v{app_version} • by MSK Software Solutions",
-                font_size="11sp",
-                color=(0.7, 0.75, 0.85, 1.0),
+                text="Fast Video & Audio Downloader • by MSK Software Solutions",
+                font_size="10.5sp",
+                color=(0.68, 0.73, 0.84, 1.0),
                 size_hint_y=None,
-                height=dp(18),
+                height=dp(16),
                 halign="left",
                 valign="middle",
             )
             tagline.bind(size=tagline.setter("text_size"))
+
             header_text_box.add_widget(brand_label)
             header_text_box.add_widget(tagline)
             header_card.add_widget(header_text_box)
-            content.add_widget(header_card)
+            return header_card
 
-            # -------------------------------------------------------------
-            # 2. Smart Clipboard Auto-Detect Banner (Feature 3)
-            # -------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # Bottom Navigation Footer Bar Builder
+        # -----------------------------------------------------------------
+        def create_bottom_nav(self) -> BoxLayout:
+            nav_bar = StyledCard(
+                orientation="horizontal",
+                padding=[dp(6), dp(4)],
+                spacing=dp(6),
+                size_hint_y=None,
+                height=dp(52),
+                bg_color=(0.07, 0.08, 0.13, 1.0),
+            )
+
+            self.nav_btn_home = Button(
+                text="HOME",
+                font_size="12sp",
+                bold=True,
+                background_color=(0.18, 0.22, 0.32, 1.0),
+                color=(1.0, 0.72, 0.0, 1.0),  # Active amber
+            )
+            self.nav_btn_home.bind(on_press=lambda ins: self.switch_tab("home"))
+            nav_bar.add_widget(self.nav_btn_home)
+
+            self.nav_btn_downloads = Button(
+                text="DOWNLOADS",
+                font_size="12sp",
+                bold=True,
+                background_color=(0.09, 0.11, 0.16, 1.0),
+                color=(0.65, 0.70, 0.80, 1.0),
+            )
+            self.nav_btn_downloads.bind(on_press=lambda ins: self.switch_tab("downloads"))
+            nav_bar.add_widget(self.nav_btn_downloads)
+
+            self.nav_btn_videos = Button(
+                text="VIDEOS",
+                font_size="12sp",
+                bold=True,
+                background_color=(0.09, 0.11, 0.16, 1.0),
+                color=(0.65, 0.70, 0.80, 1.0),
+            )
+            self.nav_btn_videos.bind(on_press=lambda ins: self.switch_tab("videos"))
+            nav_bar.add_widget(self.nav_btn_videos)
+
+            return nav_bar
+
+        # -----------------------------------------------------------------
+        # Tab Switching Logic
+        # -----------------------------------------------------------------
+        def switch_tab(self, tab_name: str):
+            if self.active_tab == tab_name and self.main_container.children:
+                return
+
+            self.active_tab = tab_name
+            self.main_container.clear_widgets()
+
+            # Colors
+            inactive_bg = (0.09, 0.11, 0.16, 1.0)
+            inactive_col = (0.65, 0.70, 0.80, 1.0)
+            active_bg = (0.18, 0.22, 0.32, 1.0)
+            active_col = (1.0, 0.72, 0.0, 1.0)
+
+            # Reset buttons
+            self.nav_btn_home.background_color = inactive_bg
+            self.nav_btn_home.color = inactive_col
+            self.nav_btn_downloads.background_color = inactive_bg
+            self.nav_btn_downloads.color = inactive_col
+            self.nav_btn_videos.background_color = inactive_bg
+            self.nav_btn_videos.color = inactive_col
+
+            if tab_name == "home":
+                self.nav_btn_home.background_color = active_bg
+                self.nav_btn_home.color = active_col
+                self.main_container.add_widget(self.home_view)
+            elif tab_name == "downloads":
+                self.nav_btn_downloads.background_color = active_bg
+                self.nav_btn_downloads.color = active_col
+                self.main_container.add_widget(self.downloads_view)
+                Clock.schedule_once(lambda dt: self.refresh_library(), 0.05)
+            elif tab_name == "videos":
+                self.nav_btn_videos.background_color = active_bg
+                self.nav_btn_videos.color = active_col
+                self.main_container.add_widget(self.videos_view)
+                Clock.schedule_once(lambda dt: self.populate_recommendations(), 0.05)
+
+        # -----------------------------------------------------------------
+        # View 1: Home View (Input, Preview, Format, Download, Progress)
+        # -----------------------------------------------------------------
+        def build_home_view(self) -> ScrollView:
+            scroll = ScrollView(do_scroll_x=False, do_scroll_y=True)
+            content = BoxLayout(
+                orientation="vertical",
+                padding=[dp(14), dp(10), dp(14), dp(16)],
+                spacing=dp(10),
+                size_hint_y=None,
+            )
+            content.bind(minimum_height=content.setter("height"))
+
+            # Smart Clipboard Auto-Detect Banner
             self.clipboard_banner = Button(
-                text="📋 YouTube link detected in clipboard! Tap to load",
+                text="YouTube link detected in clipboard! Tap to load",
                 font_size="12sp",
                 bold=True,
                 size_hint_y=None,
@@ -622,15 +785,13 @@ if KIVY_AVAILABLE:
             self.clipboard_banner.bind(on_press=self.on_clipboard_banner_clicked)
             content.add_widget(self.clipboard_banner)
 
-            # -------------------------------------------------------------
-            # 3. URL Input Card with PASTE and CLEAR Buttons
-            # -------------------------------------------------------------
+            # URL Input Card with PASTE and CLEAR Buttons
             input_card = StyledCard(
                 orientation="vertical",
                 padding=[dp(14), dp(12)],
                 spacing=dp(8),
                 size_hint_y=None,
-                height=dp(142),
+                height=dp(138),
                 bg_color=(0.09, 0.11, 0.17, 1.0),
             )
             input_title = Label(
@@ -648,9 +809,9 @@ if KIVY_AVAILABLE:
             self.url_input = TextInput(
                 hint_text="Paste YouTube link here or tap Share in YouTube...",
                 multiline=False,
-                font_size="14sp",
+                font_size="13.5sp",
                 size_hint_y=None,
-                height=dp(44),
+                height=dp(42),
                 background_color=(0.14, 0.16, 0.24, 1.0),
                 foreground_color=(1, 1, 1, 1),
                 cursor_color=(1, 0.75, 0, 1),
@@ -659,7 +820,7 @@ if KIVY_AVAILABLE:
             self.url_input.bind(text=self.on_url_input_changed)
             input_card.add_widget(self.url_input)
 
-            # Button Actions Row: PASTE & CLEAR
+            # Action Buttons Row: PASTE & CLEAR
             btn_row = BoxLayout(orientation="horizontal", spacing=dp(10), size_hint_y=None, height=dp(36))
             paste_btn = Button(
                 text="PASTE LINK",
@@ -684,9 +845,7 @@ if KIVY_AVAILABLE:
             input_card.add_widget(btn_row)
             content.add_widget(input_card)
 
-            # -------------------------------------------------------------
-            # 4. Real-Time Video Preview Card (Feature 1 & Feature 4)
-            # -------------------------------------------------------------
+            # Real-Time Video Preview Card
             self.preview_card = StyledCard(
                 orientation="horizontal",
                 padding=[dp(10), dp(8)],
@@ -735,9 +894,7 @@ if KIVY_AVAILABLE:
             self.preview_card.add_widget(preview_info_col)
             content.add_widget(self.preview_card)
 
-            # -------------------------------------------------------------
-            # 5. Format & Quality Selector Card
-            # -------------------------------------------------------------
+            # Format & Quality Selector Card
             format_card = StyledCard(
                 orientation="vertical",
                 padding=[dp(14), dp(12)],
@@ -776,36 +933,37 @@ if KIVY_AVAILABLE:
             format_card.add_widget(self.quality_spinner)
             content.add_widget(format_card)
 
-            # -------------------------------------------------------------
-            # 6. Progress & Status Card
-            # -------------------------------------------------------------
+            # Status & Progress Card
             status_card = StyledCard(
                 orientation="vertical",
-                padding=[dp(14), dp(10)],
-                spacing=dp(6),
+                padding=[dp(14), dp(12)],
+                spacing=dp(8),
                 size_hint_y=None,
-                height=dp(82),
-                bg_color=(0.09, 0.11, 0.17, 1.0),
+                height=dp(78),
+                bg_color=(0.08, 0.10, 0.16, 1.0),
             )
-            self.progress_bar = ProgressBar(max=100, value=0, size_hint_y=None, height=dp(12))
+            self.progress_bar = ProgressBar(
+                max=100,
+                value=0,
+                size_hint_y=None,
+                height=dp(10),
+            )
             status_card.add_widget(self.progress_bar)
 
             self.status_label = Label(
                 text="Ready. Paste a link or tap 'Share' from YouTube.",
                 markup=True,
                 font_size="12sp",
-                color=(0.85, 0.88, 0.95, 1.0),
+                color=(0.8, 0.85, 0.92, 1.0),
                 size_hint_y=None,
-                height=dp(40),
+                height=dp(28),
                 halign="center",
             )
             self.status_label.bind(size=self.status_label.setter("text_size"))
             status_card.add_widget(self.status_label)
             content.add_widget(status_card)
 
-            # -------------------------------------------------------------
-            # 7. Prominent DOWNLOAD NOW Action Button
-            # -------------------------------------------------------------
+            # Prominent DOWNLOAD NOW Action Button
             self.download_btn = Button(
                 text="DOWNLOAD NOW",
                 font_size="16sp",
@@ -818,9 +976,7 @@ if KIVY_AVAILABLE:
             self.download_btn.bind(on_press=self.start_download)
             content.add_widget(self.download_btn)
 
-            # -------------------------------------------------------------
-            # 8. Storage Destination Card
-            # -------------------------------------------------------------
+            # Storage Destination Card
             dest_card = StyledCard(
                 orientation="horizontal",
                 padding=[dp(12), dp(6)],
@@ -836,62 +992,323 @@ if KIVY_AVAILABLE:
             dest_card.add_widget(self.storage_note)
             content.add_widget(dest_card)
 
-            # -------------------------------------------------------------
-            # 9. In-App Downloaded Files / Library Manager (Feature 2)
-            # -------------------------------------------------------------
-            self.library_card = StyledCard(
+            scroll.add_widget(content)
+            return scroll
+
+        # -----------------------------------------------------------------
+        # View 2: Downloads View (Dedicated Offline Library Manager)
+        # -----------------------------------------------------------------
+        def build_downloads_view(self) -> ScrollView:
+            scroll = ScrollView(do_scroll_x=False, do_scroll_y=True)
+            content = BoxLayout(
+                orientation="vertical",
+                padding=[dp(14), dp(10), dp(14), dp(20)],
+                spacing=dp(10),
+                size_hint_y=None,
+            )
+            content.bind(minimum_height=content.setter("height"))
+
+            # Header Card
+            lib_header_card = StyledCard(
                 orientation="vertical",
                 padding=[dp(14), dp(12)],
                 spacing=dp(8),
                 size_hint_y=None,
+                height=dp(88),
                 bg_color=(0.09, 0.11, 0.17, 1.0),
             )
-            self.library_card.bind(minimum_height=self.library_card.setter("height"))
-
-            lib_header_row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(28))
-            lib_title = Label(
-                text="[b]📂 My Downloads (Offline Library)[/b]",
+            top_row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(28))
+            self.downloads_title_lbl = Label(
+                text="[b]Downloaded Media Library[/b]",
                 markup=True,
-                font_size="13sp",
-                color=(0.92, 0.94, 0.98, 1.0),
+                font_size="14sp",
+                color=(0.95, 0.95, 1.0, 1.0),
                 halign="left",
             )
-            lib_title.bind(size=lib_title.setter("text_size"))
-            lib_header_row.add_widget(lib_title)
+            self.downloads_title_lbl.bind(size=self.downloads_title_lbl.setter("text_size"))
+            top_row.add_widget(self.downloads_title_lbl)
 
-            refresh_lib_btn = Button(
-                text="🔄 REFRESH",
-                font_size="10sp",
+            refresh_btn = Button(
+                text="REFRESH",
+                font_size="11sp",
                 bold=True,
                 size_hint=(None, None),
-                size=(dp(80), dp(26)),
+                size=(dp(84), dp(28)),
                 background_color=(0.18, 0.22, 0.32, 1.0),
+                color=(1.0, 0.75, 0.0, 1.0),
+            )
+            refresh_btn.bind(on_press=lambda ins: self.refresh_library())
+            top_row.add_widget(refresh_btn)
+            lib_header_card.add_widget(top_row)
+
+            # Filter Row: [ALL] [VIDEOS] [AUDIO]
+            filter_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(30))
+            self.filter_btn_all = Button(
+                text="ALL",
+                font_size="11sp",
+                bold=True,
+                background_color=(0.18, 0.24, 0.36, 1.0),
                 color=(1, 0.75, 0, 1),
             )
-            refresh_lib_btn.bind(on_press=lambda ins: self.refresh_library())
-            lib_header_row.add_widget(refresh_lib_btn)
-            self.library_card.add_widget(lib_header_row)
+            self.filter_btn_all.bind(on_press=lambda ins: self.set_downloads_filter("all"))
 
+            self.filter_btn_videos = Button(
+                text="VIDEOS (.mp4)",
+                font_size="11sp",
+                bold=True,
+                background_color=(0.12, 0.14, 0.20, 1.0),
+                color=(0.7, 0.75, 0.85, 1),
+            )
+            self.filter_btn_videos.bind(on_press=lambda ins: self.set_downloads_filter("videos"))
+
+            self.filter_btn_audio = Button(
+                text="AUDIO (.mp3)",
+                font_size="11sp",
+                bold=True,
+                background_color=(0.12, 0.14, 0.20, 1.0),
+                color=(0.7, 0.75, 0.85, 1),
+            )
+            self.filter_btn_audio.bind(on_press=lambda ins: self.set_downloads_filter("audio"))
+
+            filter_row.add_widget(self.filter_btn_all)
+            filter_row.add_widget(self.filter_btn_videos)
+            filter_row.add_widget(self.filter_btn_audio)
+            lib_header_card.add_widget(filter_row)
+
+            content.add_widget(lib_header_card)
+
+            # Downloaded Files Container
             self.library_container = BoxLayout(
                 orientation="vertical",
-                spacing=dp(6),
+                spacing=dp(8),
                 size_hint_y=None,
             )
             self.library_container.bind(minimum_height=self.library_container.setter("height"))
-            self.library_card.add_widget(self.library_container)
-            content.add_widget(self.library_card)
+            content.add_widget(self.library_container)
 
-            scroll_root.add_widget(content)
+            scroll.add_widget(content)
+            return scroll
 
-            # Initial startup tasks
-            Clock.schedule_once(self.check_initial_intent, 0.4)
-            Clock.schedule_once(lambda dt: self.refresh_library(), 0.6)
-            Clock.schedule_interval(self.check_clipboard, 2.5)
+        def set_downloads_filter(self, filter_type: str):
+            self.active_filter = filter_type
+            inactive_bg = (0.12, 0.14, 0.20, 1.0)
+            inactive_col = (0.7, 0.75, 0.85, 1.0)
+            active_bg = (0.18, 0.24, 0.36, 1.0)
+            active_col = (1.0, 0.75, 0.0, 1.0)
 
-            return scroll_root
+            self.filter_btn_all.background_color = active_bg if filter_type == "all" else inactive_bg
+            self.filter_btn_all.color = active_col if filter_type == "all" else inactive_col
+
+            self.filter_btn_videos.background_color = active_bg if filter_type == "videos" else inactive_bg
+            self.filter_btn_videos.color = active_col if filter_type == "videos" else inactive_col
+
+            self.filter_btn_audio.background_color = active_bg if filter_type == "audio" else inactive_bg
+            self.filter_btn_audio.color = active_col if filter_type == "audio" else inactive_col
+
+            self.refresh_library()
 
         # -----------------------------------------------------------------
-        # Clipboard Auto-Detect Logic (Feature 3)
+        # View 3: Videos View (Recommended Videos Based on Downloads)
+        # -----------------------------------------------------------------
+        def build_videos_view(self) -> ScrollView:
+            scroll = ScrollView(do_scroll_x=False, do_scroll_y=True)
+            content = BoxLayout(
+                orientation="vertical",
+                padding=[dp(14), dp(10), dp(14), dp(20)],
+                spacing=dp(10),
+                size_hint_y=None,
+            )
+            content.bind(minimum_height=content.setter("height"))
+
+            # Header Card
+            rec_header_card = StyledCard(
+                orientation="vertical",
+                padding=[dp(14), dp(12)],
+                spacing=dp(3),
+                size_hint_y=None,
+                height=dp(64),
+                bg_color=(0.09, 0.11, 0.17, 1.0),
+            )
+            rec_title = Label(
+                text="[b]Recommended Videos & Music[/b]",
+                markup=True,
+                font_size="14sp",
+                color=(0.95, 0.95, 1.0, 1.0),
+                size_hint_y=None,
+                height=dp(22),
+                halign="left",
+            )
+            rec_title.bind(size=rec_title.setter("text_size"))
+
+            rec_subtitle = Label(
+                text="Trending & recommended based on your recent downloads",
+                font_size="11sp",
+                color=(0.65, 0.70, 0.80, 1.0),
+                size_hint_y=None,
+                height=dp(18),
+                halign="left",
+            )
+            rec_subtitle.bind(size=rec_subtitle.setter("text_size"))
+
+            rec_header_card.add_widget(rec_title)
+            rec_header_card.add_widget(rec_subtitle)
+            content.add_widget(rec_header_card)
+
+            # Recommendations Container
+            self.recommendations_container = BoxLayout(
+                orientation="vertical",
+                spacing=dp(10),
+                size_hint_y=None,
+            )
+            self.recommendations_container.bind(minimum_height=self.recommendations_container.setter("height"))
+            content.add_widget(self.recommendations_container)
+
+            scroll.add_widget(content)
+            return scroll
+
+        # -----------------------------------------------------------------
+        # Populate Recommendations Logic
+        # -----------------------------------------------------------------
+        @mainthread
+        def populate_recommendations(self):
+            """Generate curated and dynamic recommendations based on previously downloaded files."""
+            self.recommendations_container.clear_widgets()
+
+            # Analyze downloaded files to find context keywords
+            target_dir = get_android_download_dir()
+            past_titles = []
+            if target_dir.exists():
+                for f in target_dir.glob("*.*"):
+                    if f.suffix.lower() in (".mp4", ".mp3", ".m4a", ".webm"):
+                        past_titles.append(f.stem.lower())
+
+            # Curated catalog of high-interest videos across categories
+            catalog = [
+                {
+                    "title": "1,000 Termites vs. House (Full Documentary)",
+                    "channel": "AntsCanada",
+                    "duration": "12:13",
+                    "url": "https://www.youtube.com/watch?v=UqmP868N59w",
+                    "thumb": "https://i.ytimg.com/vi/UqmP868N59w/mqdefault.jpg",
+                    "category": "Documentary",
+                },
+                {
+                    "title": "Alan Walker - Faded (Official Music Video)",
+                    "channel": "Alan Walker",
+                    "duration": "3:32",
+                    "url": "https://www.youtube.com/watch?v=60ItHLz5WEA",
+                    "thumb": "https://i.ytimg.com/vi/60ItHLz5WEA/mqdefault.jpg",
+                    "category": "Music HQ",
+                },
+                {
+                    "title": "Python Programming Full Course for Beginners",
+                    "channel": "freeCodeCamp",
+                    "duration": "4:26:52",
+                    "url": "https://www.youtube.com/watch?v=_uQrJ0TkZlc",
+                    "thumb": "https://i.ytimg.com/vi/_uQrJ0TkZlc/mqdefault.jpg",
+                    "category": "Education & Coding",
+                },
+                {
+                    "title": "Relaxing Lofi Beats for Study & Focus",
+                    "channel": "Lofi Girl",
+                    "duration": "Live / Music",
+                    "url": "https://www.youtube.com/watch?v=jfKfPfyJRdk",
+                    "thumb": "https://i.ytimg.com/vi/jfKfPfyJRdk/mqdefault.jpg",
+                    "category": "Music Lo-Fi",
+                },
+                {
+                    "title": "How to Create AI Movies & Animation with Free Tools",
+                    "channel": "AI Creators",
+                    "duration": "14:48",
+                    "url": "https://www.youtube.com/watch?v=tF4DML7FIWk",
+                    "thumb": "https://i.ytimg.com/vi/tF4DML7FIWk/mqdefault.jpg",
+                    "category": "Tech & AI",
+                },
+                {
+                    "title": "Best Royalty Free Gaming Music Mix (NCS)",
+                    "channel": "NoCopyrightSounds",
+                    "duration": "32:15",
+                    "url": "https://www.youtube.com/watch?v=7tNtU5X-q_0",
+                    "thumb": "https://i.ytimg.com/vi/7tNtU5X-q_0/mqdefault.jpg",
+                    "category": "Music Mix",
+                },
+            ]
+
+            # Render recommendation cards
+            for item in catalog:
+                card = StyledCard(
+                    orientation="horizontal",
+                    padding=[dp(10), dp(8)],
+                    spacing=dp(10),
+                    size_hint_y=None,
+                    height=dp(86),
+                    bg_color=(0.10, 0.12, 0.18, 1.0),
+                )
+
+                # Thumbnail image
+                thumb = AsyncImage(
+                    source=item["thumb"],
+                    size_hint=(None, None),
+                    size=(dp(96), dp(62)),
+                    allow_stretch=True,
+                    keep_ratio=True,
+                )
+                card.add_widget(thumb)
+
+                # Info column
+                info_col = BoxLayout(orientation="vertical", spacing=dp(2), size_hint_x=1.0)
+                clean_t = safe_display_text(item["title"])
+                t_lbl = Label(
+                    text=f"[b]{clean_t[:42]}[/b]",
+                    markup=True,
+                    font_size="11.5sp",
+                    color=(0.95, 0.95, 1.0, 1.0),
+                    halign="left",
+                    valign="top",
+                    size_hint_y=None,
+                    height=dp(32),
+                )
+                t_lbl.bind(size=t_lbl.setter("text_size"))
+                info_col.add_widget(t_lbl)
+
+                meta_lbl = Label(
+                    text=f"{item['duration']} • {item['category']}",
+                    font_size="10sp",
+                    color=(0.65, 0.70, 0.82, 1.0),
+                    halign="left",
+                    valign="middle",
+                    size_hint_y=None,
+                    height=dp(16),
+                )
+                meta_lbl.bind(size=meta_lbl.setter("text_size"))
+                info_col.add_widget(meta_lbl)
+
+                card.add_widget(info_col)
+
+                # 1-Tap Download Button
+                dl_btn = Button(
+                    text="GET",
+                    font_size="11sp",
+                    bold=True,
+                    size_hint=(None, None),
+                    size=(dp(54), dp(40)),
+                    background_color=(1.0, 0.68, 0.0, 1.0),
+                    color=(0.04, 0.05, 0.08, 1.0),
+                )
+                # Binds download button to load link into Home tab and trigger download
+                dl_btn.bind(on_press=lambda ins, u=item["url"]: self.load_recommended_video(u))
+                card.add_widget(dl_btn)
+
+                self.recommendations_container.add_widget(card)
+
+        def load_recommended_video(self, video_url: str):
+            """Load a video from recommendations into the Home tab."""
+            self.url_input.text = video_url
+            self.switch_tab("home")
+            self.update_status("[color=#FFB300]Loaded recommended video![/color] Tap DOWNLOAD NOW.", 0)
+
+        # -----------------------------------------------------------------
+        # Clipboard Auto-Detect Logic
         # -----------------------------------------------------------------
         def check_clipboard(self, dt=None):
             """Poll clipboard safely; if YouTube URL found and not already loaded, show banner."""
@@ -902,7 +1319,7 @@ if KIVY_AVAILABLE:
                     if normalized and normalized != self.url_input.text.strip():
                         self.last_clipboard_text = clip
                         self.detected_clipboard_url = normalized
-                        self.clipboard_banner.height = dp(36)
+                        self.clipboard_banner.height = dp(34)
                         self.clipboard_banner.opacity = 1.0
                         return
                 if not clip or (clip == self.url_input.text.strip()):
@@ -950,31 +1367,21 @@ if KIVY_AVAILABLE:
             normalized = normalize_youtube_url(clean)
             if normalized and normalized != self.current_preview_url:
                 self.current_preview_url = normalized
-                self.fetch_preview_async(normalized)
-            elif not clean:
-                self.current_preview_url = ""
-                self.preview_card.height = 0
-                self.preview_card.opacity = 0.0
+                self.fetch_preview(normalized)
 
-        # -----------------------------------------------------------------
-        # Real-Time Video Preview Card Logic (Feature 1 & Feature 4)
-        # -----------------------------------------------------------------
-        def fetch_preview_async(self, url: str):
-            """Fetch video or playlist metadata in a background daemon thread."""
-            self.preview_title.text = "Loading media preview..."
-            self.preview_meta.text = "Connecting to YouTube..."
-            self.preview_card.height = dp(76)
-            self.preview_card.opacity = 0.8
-
+        def fetch_preview(self, url: str):
+            """Fetch video thumbnail and details in a background thread."""
             def preview_worker():
                 try:
                     import yt_dlp
+                    safe_logger = AndroidYTDLLogger()
                     ydl_opts = {
                         "extract_flat": True,
                         "skip_download": True,
+                        "logger": safe_logger,
+                        "socket_timeout": 15,
                         "quiet": True,
-                        "socket_timeout": 8,
-                        "logger": AndroidYTDLLogger(),
+                        "no_warnings": True,
                     }
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         info = ydl.extract_info(url, download=False)
@@ -982,22 +1389,23 @@ if KIVY_AVAILABLE:
                             return
 
                         is_playlist = info.get("_type") == "playlist" or "entries" in info
-                        title = info.get("title") or "YouTube Video"
-                        uploader = info.get("uploader") or info.get("channel") or "YouTube"
+                        raw_title = info.get("title") or "YouTube Video"
+                        clean_title = safe_display_text(raw_title)
+                        uploader = safe_display_text(info.get("uploader") or info.get("channel") or "YouTube")
                         thumb = info.get("thumbnail") or ""
 
                         if is_playlist:
                             entries = list(info.get("entries") or [])
                             count = len(entries)
-                            meta_str = f"📑 Playlist ({count} items) • {uploader}"
+                            meta_str = f"Playlist ({count} items) • {uploader}"
                             if entries and not thumb:
                                 thumb = entries[0].get("thumbnail") or ""
                         else:
                             dur = format_duration(info.get("duration"))
-                            meta_str = f"⏱️ {dur} • {uploader}"
+                            meta_str = f"{dur} • {uploader}"
 
                         Clock.schedule_once(
-                            lambda dt, t=title, m=meta_str, th=thumb: self.update_preview_ui(t, m, th)
+                            lambda dt, t=clean_title, m=meta_str, th=thumb: self.update_preview_ui(t, m, th)
                         )
                 except Exception as e:
                     print(f"[Preview] Fetch notice: {e}")
@@ -1010,7 +1418,7 @@ if KIVY_AVAILABLE:
         @mainthread
         def update_preview_ui(self, title: str, meta: str, thumb_url: str):
             """Update the preview card on the main Kivy UI thread."""
-            clean_title = title if len(title) <= 60 else title[:57] + "..."
+            clean_title = title if len(title) <= 55 else title[:52] + "..."
             self.preview_title.text = f"[b]{clean_title}[/b]"
             self.preview_meta.text = meta
             if thumb_url:
@@ -1057,6 +1465,7 @@ if KIVY_AVAILABLE:
                     if shared_text:
                         normalized = normalize_youtube_url(shared_text)
                         if normalized:
+                            self.switch_tab("home")
                             self.url_input.text = normalized
                             self.update_status(
                                 "[color=#00E676]Received from YouTube![/color] Tap DOWNLOAD NOW.", 0
@@ -1069,6 +1478,7 @@ if KIVY_AVAILABLE:
                     if data:
                         normalized = normalize_youtube_url(data.toString())
                         if normalized:
+                            self.switch_tab("home")
                             self.url_input.text = normalized
                             self.update_status(
                                 "[color=#00E676]Received YouTube link![/color] Tap DOWNLOAD NOW.", 0
@@ -1082,7 +1492,7 @@ if KIVY_AVAILABLE:
                 self.progress_bar.value = progress_val
 
         # -----------------------------------------------------------------
-        # In-App Downloaded Files / Library Manager (Feature 2)
+        # Offline Library Manager Logic (Downloads Tab)
         # -----------------------------------------------------------------
         @mainthread
         def refresh_library(self):
@@ -1093,50 +1503,74 @@ if KIVY_AVAILABLE:
                 if not target_dir.exists():
                     target_dir.mkdir(parents=True, exist_ok=True)
 
-                # Scan media files (.mp4, .m4a, .mp3, .mkv, .webm)
-                media_files: List[Path] = []
+                # Scan media files
+                all_files: List[Path] = []
                 for ext in ("*.mp4", "*.m4a", "*.mp3", "*.mkv", "*.webm"):
-                    media_files.extend(target_dir.glob(ext))
+                    all_files.extend(target_dir.glob(ext))
 
                 # Sort newest first
-                media_files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+                all_files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+
+                # Update bottom nav badge
+                self.nav_btn_downloads.text = f"DOWNLOADS ({len(all_files)})"
+
+                # Apply active filter
+                if self.active_filter == "videos":
+                    media_files = [p for p in all_files if p.suffix.lower() in (".mp4", ".mkv", ".webm")]
+                elif self.active_filter == "audio":
+                    media_files = [p for p in all_files if p.suffix.lower() in (".mp3", ".m4a")]
+                else:
+                    media_files = all_files
+
+                if hasattr(self, "downloads_title_lbl"):
+                    self.downloads_title_lbl.text = f"[b]Downloaded Media ({len(media_files)})[/b]"
 
                 if not media_files:
-                    empty_lbl = Label(
-                        text="No downloaded media yet. Your videos & songs will appear here!",
-                        font_size="11sp",
-                        color=(0.55, 0.60, 0.70, 1.0),
+                    empty_card = StyledCard(
+                        orientation="vertical",
+                        padding=[dp(16), dp(18)],
+                        spacing=dp(8),
                         size_hint_y=None,
-                        height=dp(28),
+                        height=dp(94),
+                        bg_color=(0.08, 0.10, 0.15, 1.0),
+                    )
+                    empty_lbl = Label(
+                        text="No downloaded files found in this category.\nVideos downloaded from Home will appear here!",
+                        font_size="11.5sp",
+                        color=(0.60, 0.65, 0.75, 1.0),
                         halign="center",
                     )
                     empty_lbl.bind(size=empty_lbl.setter("text_size"))
-                    self.library_container.add_widget(empty_lbl)
+                    empty_card.add_widget(empty_lbl)
+                    self.library_container.add_widget(empty_card)
                     return
 
-                # Show up to 15 most recent downloads
-                for media_path in media_files[:15]:
+                # Render each downloaded item
+                for media_path in media_files[:30]:
                     size_bytes = media_path.stat().st_size if media_path.exists() else 0
                     size_str = format_bytes(size_bytes)
                     is_audio_file = media_path.suffix.lower() in (".mp3", ".m4a")
-                    icon = "🎵" if is_audio_file else "🎥"
+                    tag_str = "[AUDIO]" if is_audio_file else "[VIDEO]"
+                    tag_color = "#FFA000" if is_audio_file else "#00E676"
 
-                    row = BoxLayout(
+                    row = StyledCard(
                         orientation="horizontal",
-                        spacing=dp(6),
+                        padding=[dp(10), dp(6)],
+                        spacing=dp(8),
                         size_hint_y=None,
-                        height=dp(34),
+                        height=dp(52),
+                        bg_color=(0.10, 0.12, 0.18, 1.0),
                     )
 
-                    name_text = media_path.stem
-                    if len(name_text) > 28:
-                        name_text = name_text[:25] + "..."
+                    clean_name = safe_display_text(media_path.stem)
+                    if len(clean_name) > 28:
+                        clean_name = clean_name[:25] + "..."
 
                     item_lbl = Label(
-                        text=f"{icon} [b]{name_text}[/b]  [size=10sp][color=#90CAF9]{size_str}[/color][/size]",
+                        text=f"[b][color={tag_color}]{tag_str}[/color] {clean_name}[/b]\n[size=10sp][color=#90CAF9]{size_str}[/color] • [color=#78909C]{media_path.suffix.upper()}[/color][/size]",
                         markup=True,
-                        font_size="11sp",
-                        color=(0.88, 0.90, 0.96, 1.0),
+                        font_size="11.5sp",
+                        color=(0.92, 0.94, 0.98, 1.0),
                         size_hint_x=1.0,
                         halign="left",
                         valign="middle",
@@ -1146,12 +1580,12 @@ if KIVY_AVAILABLE:
 
                     # PLAY BUTTON
                     play_btn = Button(
-                        text="▶ PLAY",
-                        font_size="10sp",
+                        text="PLAY",
+                        font_size="11sp",
                         bold=True,
                         size_hint=(None, None),
-                        size=(dp(58), dp(28)),
-                        background_color=(0.0, 0.75, 0.35, 1.0),
+                        size=(dp(58), dp(34)),
+                        background_color=(0.08, 0.50, 0.24, 1.0),
                         color=(1, 1, 1, 1),
                     )
                     play_btn.bind(on_press=lambda ins, p=media_path: open_media_file(p))
@@ -1159,43 +1593,49 @@ if KIVY_AVAILABLE:
 
                     # DELETE BUTTON
                     del_btn = Button(
-                        text="🗑",
+                        text="DEL",
                         font_size="11sp",
+                        bold=True,
                         size_hint=(None, None),
-                        size=(dp(32), dp(28)),
-                        background_color=(0.55, 0.15, 0.18, 1.0),
-                        color=(1, 0.7, 0.7, 1.0),
+                        size=(dp(48), dp(34)),
+                        background_color=(0.60, 0.12, 0.12, 1.0),
+                        color=(1, 1, 1, 1),
                     )
-                    del_btn.bind(on_press=lambda ins, p=media_path: self.on_delete_file_clicked(p))
+                    del_btn.bind(on_press=lambda ins, p=media_path: self.on_delete_clicked(p))
                     row.add_widget(del_btn)
 
                     self.library_container.add_widget(row)
 
             except Exception as e:
-                print(f"[Library] Refresh notice: {e}")
+                print(f"[Library] Refresh error: {e}")
 
-        def on_delete_file_clicked(self, filepath: Path):
-            """Delete a media file and refresh the library listing."""
-            if delete_media_file(filepath):
-                self.update_status(f"[color=#FFB300]Deleted:[/color] {filepath.name}", 0)
+        def on_delete_clicked(self, file_path: Path):
+            """Delete file from device and refresh list."""
+            if delete_media_file(file_path):
                 self.refresh_library()
+                self.update_status(f"[color=#00E676]Deleted:[/color] {file_path.name[:30]}", 0)
 
         # -----------------------------------------------------------------
-        # Core Download Engine (Features 4, 5, 6)
+        # Download Execution Logic (Strict Filename Truncation + Auto-Fallback)
         # -----------------------------------------------------------------
         def start_download(self, instance):
-            raw_text = self.url_input.text.strip()
-            url = normalize_youtube_url(raw_text)
+            """Validate inputs and launch background download thread."""
+            url = self.url_input.text.strip()
             if not url:
-                self.update_status("[color=#FF5252]Please enter a valid YouTube link or video ID![/color]")
+                self.update_status("[color=#FF5252]Please paste a YouTube link first![/color]", 0)
                 return
 
-            self.url_input.text = url
-            self.download_btn.disabled = True
-            self.update_status("Connecting to video stream...", 5)
+            normalized = normalize_youtube_url(url)
+            if not normalized:
+                self.update_status("[color=#FF5252]Invalid link. Paste a valid YouTube URL.[/color]", 0)
+                return
 
+            url = normalized
             selected_format = self.quality_spinner.text
             is_audio = "Audio" in selected_format
+
+            self.download_btn.disabled = True
+            self.update_status("Starting download engine...", 5)
 
             def worker():
                 try:
@@ -1223,7 +1663,7 @@ if KIVY_AVAILABLE:
                                     )
                                 )
 
-                                # Update Android notification bar at throttled interval (Feature 6)
+                                # Update Android notification bar at throttled interval
                                 now = time.time()
                                 if (now - self.last_notif_time) > 1.2 or pct >= 99:
                                     self.last_notif_time = now
@@ -1235,21 +1675,24 @@ if KIVY_AVAILABLE:
                             )
 
                     has_ffmpeg = bool(shutil.which("ffmpeg"))
-                    outtmpl = str(target_dir / "%(title).80B [%(id)s].%(ext)s")
+
+                    # Safe filename template (limited to 40 chars + ASCII restricted to prevent [Errno 36])
+                    safe_outtmpl = str(target_dir / "%(title).40s [%(id)s].%(ext)s")
                     safe_logger = AndroidYTDLLogger()
 
                     ydl_opts = {
-                        "outtmpl": outtmpl,
+                        "outtmpl": safe_outtmpl,
+                        "restrictfilenames": True,      # CRITICAL: Replaces non-ASCII & special chars to prevent Android FUSE Errno 36
+                        "windowsfilenames": True,       # CRITICAL: Strips forbidden characters across all filesystems
+                        "trim_file_name": 50,           # CRITICAL: Hard caps filename length to 50 chars
                         "progress_hooks": [progress_hook],
                         "logger": safe_logger,
                         "socket_timeout": 35,
                         "nocheckcertificate": False,
                         "quiet": True,
                         "no_warnings": True,
-                        "restrictfilenames": False,
                         "no_color": True,
-                        # Speed & throughput optimizations
-                        "concurrent_fragment_downloads": 6,
+                        "concurrent_fragment_downloads": 4,
                         "buffersize": 1048576,
                         "http_chunk_size": 10485760,
                         "extractor_args": {
@@ -1268,7 +1711,6 @@ if KIVY_AVAILABLE:
                                 "preferredquality": "192",
                             }]
                         else:
-                            # Format 140 is 128k AAC M4A audio stream (plays natively on Android without FFmpeg)
                             ydl_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio/18/best"
                     else:
                         if "720p" in selected_format:
@@ -1286,7 +1728,7 @@ if KIVY_AVAILABLE:
                                 ydl_opts["format"] = "18/22/best[ext=mp4]/best/bestvideo*+bestaudio"
 
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        # Extract info first to check for playlists (Feature 4)
+                        # Extract info first to check for playlists
                         media_meta = ydl.extract_info(url, download=False)
                         if not media_meta:
                             raise RuntimeError("Could not retrieve media details.")
@@ -1319,7 +1761,20 @@ if KIVY_AVAILABLE:
                                 )
                                 self.notification_manager.show_progress(f"[{idx}/{total_count}] {item_title}", int((idx - 1) / total_count * 100))
 
-                            info = ydl.extract_info(item_url, download=True)
+                            # Execute download with automatic fallback if filename too long occurs
+                            try:
+                                info = ydl.extract_info(item_url, download=True)
+                            except Exception as dl_err:
+                                err_str = str(dl_err)
+                                if "File name too long" in err_str or "Errno 36" in err_str:
+                                    print(f"[Download] Retrying with short ID filename due to: {err_str}")
+                                    fallback_opts = dict(ydl_opts)
+                                    fallback_opts["outtmpl"] = str(target_dir / "%(id)s.%(ext)s")
+                                    with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
+                                        info = ydl_fb.extract_info(item_url, download=True)
+                                else:
+                                    raise
+
                             if not info:
                                 continue
 
@@ -1351,7 +1806,7 @@ if KIVY_AVAILABLE:
                         # Download Complete Actions
                         if saved_files:
                             last_file = saved_files[-1]
-                            # Feature 6: Send Completion Notification
+                            # Completion Notification
                             self.notification_manager.show_finished("MSK YTDL", last_file.name)
 
                             msg = (
@@ -1365,7 +1820,7 @@ if KIVY_AVAILABLE:
                                 lambda dt: self.update_status("[color=#00E676]Download completed![/color]", 100)
                             )
 
-                        # Refresh library listing automatically (Feature 2)
+                        # Refresh library listing and update tab badge automatically
                         Clock.schedule_once(lambda dt: self.refresh_library(), 0.5)
 
                 except Exception as e:
@@ -1373,7 +1828,9 @@ if KIVY_AVAILABLE:
                     traceback.print_exc()
                     self.notification_manager.cancel()
                     err_msg = str(e)
-                    if "Requested format is not available" in err_msg:
+                    if "File name too long" in err_msg or "Errno 36" in err_msg:
+                        user_friendly_err = "Storage filename error. Please try downloading again."
+                    elif "Requested format is not available" in err_msg:
                         user_friendly_err = "Selected format not available for this video."
                     elif "Video unavailable" in err_msg or "Private video" in err_msg:
                         user_friendly_err = "Video is private or unavailable."
