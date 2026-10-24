@@ -19,7 +19,8 @@ If access to media is restricted, please use the platform's authorized website, 
 
 ## Key Features
 
-* **Dual Interface:** Polished, interactive terminal menu with 14 numbered options for beginners, plus a full-featured direct CLI argument interface for power users and automation scripts.
+* **Triple Interface:** Polished interactive terminal menu with 15 numbered options, modern VidMate-style browser web application, and direct CLI flags for power users and automation.
+* **Local VidMate-Style Web App:** Built-in web server (`run_web.bat` or `--web`) that launches a responsive dark-mode browser UI accessible on your PC (`http://localhost:8899`) or across your local Wi-Fi on Android phones and tablets!
 * **Standalone Windows Executable & Portable Packager:** 1-click builder (`build_exe.bat` or Option 14) that compiles a standalone `MSK-YTDL.exe`, bundles `ffmpeg.exe` and `ffprobe.exe`, and generates a ready-to-share `MSK-YTDL-Windows-x64.zip` file for friends (no Python or FFmpeg installation needed on their PC).
 * **Android APK Cloud Compilation & Mobile Support:** Turnkey GitHub Actions workflow (`.github/workflows/build-apk.yml`) to compile true Android `.apk` files for free in the cloud, plus an instant 1-click Termux setup script (`install_android.sh`) to run natively on Android phones with downloads saving directly to `/sdcard/Download/YouTube`.
 * **Full Playlist Downloads:** Download complete YouTube playlists as video or MP3 audio with automatic folder organization (`<Playlist Title>/`), configurable item ranges (`--playlist-start`, `--playlist-end`), or custom item selectors (`--playlist-items '1,3-5,8'`).
@@ -148,6 +149,7 @@ You will be greeted by the interactive terminal interface:
   12. Change Download Folder
   13. Open Download Folder in File Explorer
   14. Package for Friends (Windows .EXE / Android APK Guide)
+  15. Launch Web UI (VidMate-Style Mobile/Browser App)
   0. Exit
 
 Select an option:
@@ -257,6 +259,16 @@ run.bat --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" --output-dir "D:/Arc
 run.bat --package-windows
 ```
 
+#### P. Launch Local Web UI (VidMate-Style Mobile/Browser App)
+Start the built-in local server and open your browser at `http://localhost:8899` (or open the displayed Wi-Fi URL on your Android phone/tablet):
+```powershell
+# Double-click or run the batch launcher:
+run_web.bat
+
+# Or launch via Python CLI flags:
+run.bat --web --port 8899
+```
+
 ---
 
 ## Packaging & Sharing with Friends (Windows .EXE & Android .APK)
@@ -342,7 +354,7 @@ run.bat --check
 
 ## Running Automated Tests
 
-The test suite contains 88 deterministic unit tests that run independently of live YouTube access using mocks:
+The test suite contains 95 deterministic unit tests that run independently of live YouTube access using mocks:
 
 ```powershell
 # Run the complete test suite
@@ -358,6 +370,7 @@ Test coverage includes:
 * **Smart archive & skip mechanics:** Checking record logs, handling archive hits without failure, custom archive path routing.
 * **Audio cover art & metadata pipeline:** FFmpeg thumbnail conversion (`webp` -> `jpg`), `EmbedThumbnail`, `FFmpegMetadata`, ID3 tagging.
 * **Standalone packager & CLI:** `--package-windows` argument parsing and runner integration, bundled FFmpeg fallback detection.
+* **VidMate Web Application & REST API:** Thread-safe job manager, status diagnostics, inspection endpoints, local IP resolution, and static asset serving.
 * **Downloader mechanics:** Format selector generation for all resolution tiers, yt-dlp option dictionaries, resume support.
 * **Playlist & Batch engine:** Error isolation, range filtering, subfolder generation, progress tracking, and tabular reporting.
 * **Audio conversion:** MP3 postprocessor options, missing FFmpeg detection.

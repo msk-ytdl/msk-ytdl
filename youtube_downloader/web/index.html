@@ -1,0 +1,970 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>MSK Video Downloader - Modern Web App</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #0a0b10;
+      --bg-card: rgba(22, 24, 34, 0.75);
+      --bg-card-hover: rgba(30, 33, 46, 0.85);
+      --bg-input: #151722;
+      --border-color: rgba(255, 255, 255, 0.08);
+      --border-focus: #ffb300;
+      --primary: #ffb300;
+      --primary-hover: #ffc107;
+      --primary-gradient: linear-gradient(135deg, #ffb300 0%, #ff7043 100%);
+      --accent-cyan: #00e5ff;
+      --accent-green: #00e676;
+      --text-main: #f5f6fa;
+      --text-muted: #8e94a5;
+      --shadow-glow: 0 0 25px rgba(255, 179, 0, 0.25);
+      --radius-sm: 8px;
+      --radius-md: 14px;
+      --radius-lg: 20px;
+      --radius-full: 9999px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: var(--bg-dark);
+      background-image: 
+        radial-gradient(circle at 15% 15%, rgba(255, 179, 0, 0.08) 0%, transparent 40%),
+        radial-gradient(circle at 85% 80%, rgba(0, 229, 255, 0.06) 0%, transparent 40%);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Top Navigation Bar */
+    header {
+      background: rgba(15, 16, 24, 0.8);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border-color);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .nav-container {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 14px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+    }
+
+    .brand-logo {
+      background: var(--primary-gradient);
+      color: #000;
+      font-family: 'Outfit', sans-serif;
+      font-weight: 800;
+      font-size: 15px;
+      padding: 6px 12px;
+      border-radius: var(--radius-sm);
+      letter-spacing: 0.5px;
+      box-shadow: 0 4px 15px rgba(255, 179, 0, 0.3);
+    }
+
+    .brand-title {
+      font-family: 'Outfit', sans-serif;
+      font-size: 19px;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    .brand-title span {
+      color: var(--primary);
+    }
+
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(0, 230, 118, 0.1);
+      color: var(--accent-green);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 6px 14px;
+      border-radius: var(--radius-full);
+      border: 1px solid rgba(0, 230, 118, 0.2);
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      background: var(--accent-green);
+      border-radius: 50%;
+      box-shadow: 0 0 8px var(--accent-green);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.85); }
+    }
+
+    .btn-icon {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      padding: 8px 14px;
+      border-radius: var(--radius-md);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s ease;
+    }
+
+    .btn-icon:hover {
+      background: var(--bg-card-hover);
+      border-color: rgba(255, 255, 255, 0.2);
+      transform: translateY(-1px);
+    }
+
+    /* Main Container */
+    main {
+      flex: 1;
+      max-width: 900px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 30px 20px 60px;
+    }
+
+    /* Hero Section */
+    .hero {
+      text-align: center;
+      margin-bottom: 30px;
+    }
+
+    .hero-badge {
+      display: inline-block;
+      background: rgba(255, 179, 0, 0.12);
+      color: var(--primary);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      padding: 5px 14px;
+      border-radius: var(--radius-full);
+      margin-bottom: 12px;
+      border: 1px solid rgba(255, 179, 0, 0.25);
+    }
+
+    .hero h1 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 34px;
+      font-weight: 800;
+      line-height: 1.25;
+      margin-bottom: 10px;
+    }
+
+    .hero h1 span {
+      background: var(--primary-gradient);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .hero p {
+      color: var(--text-muted);
+      font-size: 15px;
+      max-width: 580px;
+      margin: 0 auto;
+    }
+
+    /* Search & Input Box */
+    .search-box-card {
+      background: var(--bg-card);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-lg);
+      padding: 16px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+      margin-bottom: 30px;
+      transition: border-color 0.3s;
+    }
+
+    .search-box-card:focus-within {
+      border-color: rgba(255, 179, 0, 0.5);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4), var(--shadow-glow);
+    }
+
+    .search-input-group {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .url-input {
+      flex: 1;
+      background: var(--bg-input);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      padding: 15px 18px;
+      font-size: 15px;
+      color: #fff;
+      outline: none;
+      transition: all 0.2s;
+    }
+
+    .url-input::placeholder {
+      color: #656b7c;
+    }
+
+    .url-input:focus {
+      border-color: var(--border-focus);
+      background: #191b29;
+    }
+
+    .btn-paste {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      padding: 15px 18px;
+      border-radius: var(--radius-md);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+
+    .btn-paste:hover {
+      background: rgba(255, 255, 255, 0.12);
+    }
+
+    .btn-analyze {
+      background: var(--primary-gradient);
+      color: #000;
+      border: none;
+      padding: 15px 28px;
+      border-radius: var(--radius-md);
+      font-family: 'Outfit', sans-serif;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      box-shadow: 0 4px 15px rgba(255, 179, 0, 0.3);
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+
+    .btn-analyze:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(255, 179, 0, 0.45);
+    }
+
+    .btn-analyze:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    /* Video Preview Card */
+    .preview-card {
+      display: none;
+      background: var(--bg-card);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 179, 0, 0.2);
+      border-radius: var(--radius-lg);
+      padding: 24px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+      margin-bottom: 30px;
+      animation: fadeIn 0.35s ease;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .preview-layout {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      gap: 22px;
+    }
+
+    .thumb-wrapper {
+      position: relative;
+      border-radius: var(--radius-md);
+      overflow: hidden;
+      aspect-ratio: 16 / 9;
+      background: #111;
+    }
+
+    .thumb-img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .thumb-duration {
+      position: absolute;
+      bottom: 8px;
+      right: 8px;
+      background: rgba(0, 0, 0, 0.8);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 7px;
+      border-radius: 4px;
+    }
+
+    .video-info h2 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 19px;
+      font-weight: 700;
+      line-height: 1.35;
+      margin-bottom: 8px;
+      color: #fff;
+    }
+
+    .video-meta-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      color: var(--text-muted);
+      font-size: 13px;
+      margin-bottom: 18px;
+    }
+
+    .meta-tag {
+      background: rgba(255, 255, 255, 0.05);
+      padding: 4px 10px;
+      border-radius: var(--radius-sm);
+    }
+
+    .quality-section-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 10px;
+    }
+
+    .quality-options-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+
+    .quality-chip {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+      cursor: pointer;
+      text-align: center;
+      transition: all 0.2s;
+    }
+
+    .quality-chip:hover {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .quality-chip.active {
+      background: rgba(255, 179, 0, 0.15);
+      border-color: var(--primary);
+      box-shadow: 0 0 12px rgba(255, 179, 0, 0.2);
+    }
+
+    .quality-chip .q-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 2px;
+    }
+
+    .quality-chip.active .q-title {
+      color: var(--primary);
+    }
+
+    .quality-chip .q-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .btn-download-big {
+      background: var(--primary-gradient);
+      color: #000;
+      border: none;
+      width: 100%;
+      padding: 16px;
+      border-radius: var(--radius-md);
+      font-family: 'Outfit', sans-serif;
+      font-size: 16px;
+      font-weight: 800;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      box-shadow: 0 6px 20px rgba(255, 179, 0, 0.35);
+      transition: all 0.2s;
+    }
+
+    .btn-download-big:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 25px rgba(255, 179, 0, 0.5);
+    }
+
+    /* Downloads Manager */
+    .downloads-section {
+      margin-top: 35px;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+
+    .section-title {
+      font-family: 'Outfit', sans-serif;
+      font-size: 18px;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    .jobs-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .job-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      animation: fadeIn 0.3s ease;
+    }
+
+    .job-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .job-title-group {
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .job-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #fff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 3px;
+    }
+
+    .job-sub {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .job-status-badge {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      padding: 4px 10px;
+      border-radius: var(--radius-full);
+      white-space: nowrap;
+    }
+
+    .job-status-badge.downloading {
+      background: rgba(0, 229, 255, 0.15);
+      color: var(--accent-cyan);
+      border: 1px solid rgba(0, 229, 255, 0.3);
+    }
+
+    .job-status-badge.converting {
+      background: rgba(255, 179, 0, 0.15);
+      color: var(--primary);
+      border: 1px solid rgba(255, 179, 0, 0.3);
+    }
+
+    .job-status-badge.completed {
+      background: rgba(0, 230, 118, 0.15);
+      color: var(--accent-green);
+      border: 1px solid rgba(0, 230, 118, 0.3);
+    }
+
+    .job-status-badge.skipped {
+      background: rgba(255, 193, 7, 0.15);
+      color: #ffc107;
+      border: 1px solid rgba(255, 193, 7, 0.3);
+    }
+
+    .job-status-badge.failed {
+      background: rgba(255, 82, 82, 0.15);
+      color: #ff5252;
+      border: 1px solid rgba(255, 82, 82, 0.3);
+    }
+
+    .progress-bar-container {
+      width: 100%;
+      height: 8px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: var(--radius-full);
+      overflow: hidden;
+      position: relative;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      background: var(--primary-gradient);
+      border-radius: var(--radius-full);
+      transition: width 0.25s ease;
+    }
+
+    .job-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    /* Legal Banner */
+    .legal-notice {
+      text-align: center;
+      font-size: 12px;
+      color: #6d7385;
+      margin-top: 40px;
+      line-height: 1.6;
+    }
+
+    /* Toast Notification */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: #1c1f2e;
+      color: #fff;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      padding: 14px 20px;
+      font-size: 13px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      display: none;
+      z-index: 1000;
+      animation: slideUp 0.3s ease;
+    }
+
+    @keyframes slideUp {
+      from { transform: translateY(20px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+
+    /* Mobile Responsive */
+    @media (max-width: 768px) {
+      .preview-layout {
+        grid-template-columns: 1fr;
+      }
+      .search-input-group {
+        flex-direction: column;
+      }
+      .url-input, .btn-paste, .btn-analyze {
+        width: 100%;
+      }
+      .hero h1 {
+        font-size: 26px;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Navigation Header -->
+  <header>
+    <div class="nav-container">
+      <a href="/" class="brand">
+        <div class="brand-logo">MSK</div>
+        <div class="brand-title">Video <span>Downloader</span></div>
+      </a>
+      <div class="nav-actions">
+        <div class="status-badge" id="systemStatusBadge">
+          <div class="status-dot"></div>
+          <span>System Ready</span>
+        </div>
+        <button class="btn-icon" id="openFolderBtn" onclick="openDownloadFolder()">
+          📁 Open Folder
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content Area -->
+  <main>
+    <!-- Hero Header -->
+    <div class="hero">
+      <div class="hero-badge">VidMate Edition v1.0.0</div>
+      <h1>Download <span>Videos & Audio</span> in Top Quality</h1>
+      <p>Save high-resolution 4K/1080p videos or 320 kbps MP3s directly to your device with album art.</p>
+    </div>
+
+    <!-- Search / URL Input Box -->
+    <div class="search-box-card">
+      <div class="search-input-group">
+        <input 
+          type="text" 
+          id="urlInput" 
+          class="url-input" 
+          placeholder="Paste YouTube video or playlist link here..."
+          autocomplete="off"
+        >
+        <button class="btn-paste" id="pasteBtn" onclick="pasteClipboard()">
+          📋 Paste
+        </button>
+        <button class="btn-analyze" id="analyzeBtn" onclick="analyzeUrl()">
+          <span id="analyzeBtnText">Analyze Link</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Video Preview & Format Selection Card -->
+    <div class="preview-card" id="previewCard">
+      <div class="preview-layout">
+        <!-- Thumbnail -->
+        <div class="thumb-wrapper">
+          <img id="previewThumb" class="thumb-img" src="" alt="Thumbnail">
+          <div class="thumb-duration" id="previewDuration">00:00</div>
+        </div>
+
+        <!-- Video Details & Formats -->
+        <div class="video-info">
+          <h2 id="previewTitle">Video Title</h2>
+          <div class="video-meta-tags">
+            <span class="meta-tag" id="previewChannel">Channel Name</span>
+            <span class="meta-tag" id="previewDate">Date</span>
+          </div>
+
+          <div class="quality-section-title">Select Format & Quality:</div>
+          <div class="quality-options-grid" id="qualityOptionsGrid">
+            <!-- Dynamically populated options -->
+          </div>
+
+          <button class="btn-download-big" id="downloadBigBtn" onclick="startDownload()">
+            ⚡ START DOWNLOAD
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Live Downloads Progress List -->
+    <div class="downloads-section">
+      <div class="section-header">
+        <div class="section-title">Downloads & Queue</div>
+        <span style="font-size: 12px; color: var(--text-muted);" id="activeCount">0 active</span>
+      </div>
+
+      <div class="jobs-list" id="jobsList">
+        <div style="text-align: center; color: var(--text-muted); font-size: 14px; padding: 30px;" id="emptyJobsNotice">
+          No active downloads yet. Paste a link above to get started!
+        </div>
+      </div>
+    </div>
+
+    <!-- Legal & Ownership Notice -->
+    <div class="legal-notice">
+      MSK-YTDL is intended strictly for downloading videos you own or have explicit written permission to save.<br>
+      Respect platform terms of service and creators' rights.
+    </div>
+  </main>
+
+  <!-- Notification Toast -->
+  <div class="toast" id="toastMessage">Notification message</div>
+
+  <script>
+    let currentVideoData = null;
+    let selectedMode = 'video';
+    let selectedQuality = 'best';
+    let selectedAudioQuality = '320';
+    let selectedAudioFormat = 'mp3';
+    let pollInterval = null;
+
+    // Toast helper
+    function showToast(text, duration = 3000) {
+      const toast = document.getElementById('toastMessage');
+      toast.innerText = text;
+      toast.style.display = 'block';
+      setTimeout(() => {
+        toast.style.display = 'none';
+      }, duration);
+    }
+
+    // Paste clipboard helper
+    async function pasteClipboard() {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) {
+          document.getElementById('urlInput').value = text.trim();
+          showToast('Pasted link from clipboard!');
+          analyzeUrl();
+        }
+      } catch (err) {
+        showToast('Please paste manually using Ctrl+V or long-press.');
+      }
+    }
+
+    // Open Download folder in explorer
+    async function openDownloadFolder() {
+      try {
+        const res = await fetch('/api/open-folder', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          showToast('Opened download folder on your PC!');
+        } else {
+          showToast('Download directory: ' + (data.path || 'Saved in Downloads'));
+        }
+      } catch (e) {
+        showToast('Could not open folder automatically.');
+      }
+    }
+
+    // Analyze URL
+    async function analyzeUrl() {
+      const urlInput = document.getElementById('urlInput');
+      const url = urlInput.value.trim();
+      if (!url) {
+        showToast('Please enter a YouTube link first!');
+        return;
+      }
+
+      const analyzeBtn = document.getElementById('analyzeBtn');
+      const btnText = document.getElementById('analyzeBtnText');
+      analyzeBtn.disabled = true;
+      btnText.innerText = 'Analyzing...';
+
+      try {
+        const res = await fetch('/api/inspect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url })
+        });
+        const data = await res.json();
+
+        if (!data.success) {
+          showToast('Error: ' + (data.error || 'Failed to inspect link'));
+          return;
+        }
+
+        currentVideoData = data;
+        renderPreviewCard(data);
+      } catch (err) {
+        showToast('Inspection failed: ' + err.message);
+      } finally {
+        analyzeBtn.disabled = false;
+        btnText.innerText = 'Analyze Link';
+      }
+    }
+
+    // Render Preview Card with quality chips
+    function renderPreviewCard(data) {
+      const previewCard = document.getElementById('previewCard');
+      const previewThumb = document.getElementById('previewThumb');
+      const previewTitle = document.getElementById('previewTitle');
+      const previewChannel = document.getElementById('previewChannel');
+      const previewDate = document.getElementById('previewDate');
+      const previewDuration = document.getElementById('previewDuration');
+      const qualityGrid = document.getElementById('qualityOptionsGrid');
+
+      previewThumb.src = data.thumbnail || 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600';
+      previewTitle.innerText = data.title;
+      previewChannel.innerText = '👤 ' + (data.uploader || 'YouTube Channel');
+      previewDate.innerText = data.is_playlist ? ('📚 ' + data.entries_count + ' videos') : ('📅 ' + (data.upload_date || 'Recently uploaded'));
+      previewDuration.innerText = data.duration || 'Video';
+
+      // Build quality choices
+      qualityGrid.innerHTML = '';
+      const choices = [
+        { title: 'Best Quality', sub: 'Max resolution', mode: 'video', quality: 'best' },
+        { title: '1080p Full HD', sub: 'MP4 Video', mode: 'video', quality: '1080p' },
+        { title: '720p HD', sub: 'MP4 Video', mode: 'video', quality: '720p' },
+        { title: 'MP3 (320k)', sub: 'High-res audio', mode: 'audio', quality: 'best', audio_quality: '320' },
+        { title: 'MP3 (192k)', sub: 'Standard audio', mode: 'audio', quality: 'best', audio_quality: '192' },
+        { title: 'Original Audio', sub: 'Best raw stream', mode: 'audio', quality: 'best', audio_format: 'best' },
+      ];
+
+      choices.forEach((choice, idx) => {
+        const chip = document.createElement('div');
+        chip.className = 'quality-chip' + (idx === 0 ? ' active' : '');
+        chip.innerHTML = `<div class="q-title">${choice.title}</div><div class="q-sub">${choice.sub}</div>`;
+        chip.onclick = () => {
+          document.querySelectorAll('.quality-chip').forEach(c => c.classList.remove('active'));
+          chip.classList.add('active');
+          selectedMode = choice.mode;
+          selectedQuality = choice.quality;
+          if (choice.audio_quality) selectedAudioQuality = choice.audio_quality;
+          if (choice.audio_format) selectedAudioFormat = choice.audio_format;
+        };
+        qualityGrid.appendChild(chip);
+      });
+
+      // Default selection
+      selectedMode = 'video';
+      selectedQuality = 'best';
+      selectedAudioQuality = '320';
+      selectedAudioFormat = 'mp3';
+
+      previewCard.style.display = 'block';
+      previewCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    // Trigger Download
+    async function startDownload() {
+      const url = document.getElementById('urlInput').value.trim();
+      if (!url) {
+        showToast('Please enter a URL first!');
+        return;
+      }
+
+      const downloadBtn = document.getElementById('downloadBigBtn');
+      downloadBtn.disabled = true;
+      downloadBtn.innerText = 'Starting Download...';
+
+      try {
+        const res = await fetch('/api/download', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: url,
+            mode: selectedMode,
+            quality: selectedQuality,
+            audio_quality: selectedAudioQuality,
+            audio_format: selectedAudioFormat,
+          })
+        });
+
+        const data = await res.json();
+        if (data.success) {
+          showToast('Download started in background!');
+          pollJobs();
+        } else {
+          showToast('Failed to start: ' + (data.error || 'Unknown error'));
+        }
+      } catch (err) {
+        showToast('Error: ' + err.message);
+      } finally {
+        downloadBtn.disabled = false;
+        downloadBtn.innerText = '⚡ START DOWNLOAD';
+      }
+    }
+
+    // Poll active jobs
+    async function pollJobs() {
+      try {
+        const res = await fetch('/api/jobs');
+        const data = await res.json();
+        renderJobs(data.jobs || []);
+      } catch (e) {}
+    }
+
+    // Render Job Cards
+    function renderJobs(jobs) {
+      const jobsList = document.getElementById('jobsList');
+      const emptyNotice = document.getElementById('emptyJobsNotice');
+      const activeCount = document.getElementById('activeCount');
+
+      if (!jobs || jobs.length === 0) {
+        if (emptyNotice) emptyNotice.style.display = 'block';
+        if (activeCount) activeCount.innerText = '0 active';
+        return;
+      }
+
+      if (emptyNotice) emptyNotice.style.display = 'none';
+
+      let active = 0;
+      jobsList.innerHTML = '';
+
+      jobs.forEach(job => {
+        if (job.status === 'downloading' || job.status === 'converting' || job.status === 'queued') {
+          active++;
+        }
+
+        const card = document.createElement('div');
+        card.className = 'job-card';
+
+        const displayTitle = job.title || job.filename || job.url;
+        const progressWidth = Math.max(5, Math.min(100, job.progress || 0));
+
+        let statusClass = job.status;
+        let statusLabel = job.status.toUpperCase();
+        if (job.status === 'downloading') statusLabel = `${job.progress.toFixed(0)}%`;
+        if (job.status === 'converting') statusLabel = 'POST-PROCESSING';
+
+        card.innerHTML = `
+          <div class="job-header">
+            <div class="job-title-group">
+              <div class="job-title">${displayTitle}</div>
+              <div class="job-sub">${job.mode.toUpperCase()} • ${job.quality || job.audio_quality + ' kbps'}</div>
+            </div>
+            <div class="job-status-badge ${statusClass}">${statusLabel}</div>
+          </div>
+          <div class="progress-bar-container">
+            <div class="progress-bar-fill" style="width: ${progressWidth}%"></div>
+          </div>
+          <div class="job-footer">
+            <div>${job.speed || '0 KB/s'}</div>
+            <div>${job.status === 'completed' ? 'Finished' : (job.eta ? 'ETA: ' + job.eta : '')}</div>
+          </div>
+        `;
+        jobsList.appendChild(card);
+      });
+
+      if (activeCount) {
+        activeCount.innerText = active > 0 ? `${active} active` : 'All finished';
+      }
+    }
+
+    // Start background poller on page load
+    setInterval(pollJobs, 1500);
+    pollJobs();
+  </script>
+</body>
+</html>

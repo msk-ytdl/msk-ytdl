@@ -145,6 +145,10 @@ def build_executable(onefile: bool = False) -> bool:
         "--console",
     ]
 
+    web_dir = PROJECT_ROOT / "youtube_downloader" / "web"
+    if web_dir.exists():
+        cmd.extend(["--add-data", f"{web_dir};youtube_downloader/web"])
+
     if onefile:
         cmd.append("--onefile")
     else:

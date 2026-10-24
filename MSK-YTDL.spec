@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = []
+datas = [('D:/Sumit/projects/VideMate-Clone/msk-ytdl/youtube_downloader/web', 'youtube_downloader/web')]
 binaries = []
 hiddenimports = ['youtube_downloader', 'mutagen', 'urllib3']
 tmp_ret = collect_all('yt_dlp')

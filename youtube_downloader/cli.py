@@ -436,7 +436,7 @@ def show_packaging_menu() -> None:
 def interactive_menu(config: AppConfig, debug: bool = False) -> None:
     """Run interactive terminal menu loop."""
     downloader = YoutubeDownloader(config=config, console=console, debug=debug)
-    menu_choices = [str(i) for i in range(15)]
+    menu_choices = [str(i) for i in range(16)]
 
     while True:
         console.print()
@@ -459,6 +459,7 @@ def interactive_menu(config: AppConfig, debug: bool = False) -> None:
         console.print("  [bold]12.[/bold] Change Download Folder")
         console.print("  [bold]13.[/bold] Open Download Folder in File Explorer")
         console.print("  [bold]14.[/bold] Package for Friends (Windows .EXE / Android APK Guide)")
+        console.print("  [bold]15.[/bold] Launch Web UI (VidMate-Style Mobile/Browser App)")
         console.print("  [bold]0.[/bold] Exit")
         console.print()
 
@@ -686,6 +687,10 @@ def interactive_menu(config: AppConfig, debug: bool = False) -> None:
         elif choice == "14":
             show_packaging_menu()
 
+        elif choice == "15":
+            from youtube_downloader.web_server import run_web_server
+            run_web_server()
+
         # Allow user to pause and view result before returning to menu
         if choice != "0":
             try:
@@ -714,6 +719,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--package-windows",
         action="store_true",
         help="Build standalone Windows executable (.exe) and shareable ZIP archive."
+    )
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="Launch the local VidMate-style browser web application."
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8899,
+        help="Port to bind the local web application server to (default: 8899)."
     )
     parser.add_argument(
         "--url", "-u",
@@ -853,6 +869,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             return build_main()
         except Exception as e:
             console.print(f"[bold red]Packaging error:[/bold red] {e}")
+            return 1
+
+    # 3. Web UI flag
+    if args.web:
+        try:
+            from youtube_downloader.web_server import run_web_server
+            run_web_server(port=args.port)
+            return 0
+        except Exception as e:
+            console.print(f"[bold red]Web server error:[/bold red] {e}")
             return 1
 
     config = load_config()
