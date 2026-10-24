@@ -8,7 +8,7 @@ param (
     [switch]$InstallCert = $false
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 
 Write-Host "`n[MSK Software Solutions] Code Signing Utility" -ForegroundColor Cyan
 Write-Host "=================================================" -ForegroundColor DarkGray
@@ -133,6 +133,9 @@ if (Test-Path "$PSScriptRoot\..\dist\MSK-YTDL-Portable") {
 }
 
 $siteDownloadBat = "$PSScriptRoot\..\msk-ytdl-site\downloads\Install_MSK_Certificate.bat"
-Set-Content -Path $siteDownloadBat -Value $installerBatContent -Encoding Ascii
+if (Test-Path "$PSScriptRoot\..\msk-ytdl-site\downloads") {
+    Set-Content -Path $siteDownloadBat -Value $installerBatContent -Encoding Ascii
+    Write-Host "Generated: $siteDownloadBat" -ForegroundColor Green
+}
 
 Write-Host "`nAll Windows signing steps completed successfully." -ForegroundColor Green

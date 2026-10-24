@@ -130,6 +130,7 @@ jobs:
           if (Test-Path dist/MSK-YTDL.exe) {
             .\scripts\sign_windows_exe.ps1 -ExePath dist/MSK-YTDL.exe
           }
+        continue-on-error: true
 
       - name: Upload Windows Standalone EXE artifact
         uses: actions/upload-artifact@v4
