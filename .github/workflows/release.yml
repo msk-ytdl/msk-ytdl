@@ -52,9 +52,10 @@ jobs:
           if [ -z "$BASE_VER" ]; then
             BASE_VER="1.0.1"
           fi
-          FULL_VER="${BASE_VER}.${{ github.run_number }}"
-          sed -i "s/^version = .*/version = ${FULL_VER}/" buildozer.spec
-          echo "Injected version ${FULL_VER} into buildozer.spec"
+          sed -i "s/^version = .*/version = ${BASE_VER}/" buildozer.spec
+          sed -i "s/^android.numeric_version = .*/android.numeric_version = ${{ github.run_number }}/" buildozer.spec
+          echo "Injected version ${BASE_VER} and android.numeric_version ${{ github.run_number }} into buildozer.spec"
+          grep -E "version" buildozer.spec
 
       - name: Build Android APK with Buildozer
         run: |

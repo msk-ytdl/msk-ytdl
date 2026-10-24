@@ -24,6 +24,9 @@ source.exclude_patterns = *.spec, *.cer, *.bat, *.sh, *.ps1, *.md, *.p12, *.keys
 # (str) Application versioning (method 1)
 version = 1.0.1
 
+# (int) Numeric version code (Android versionCode)
+android.numeric_version = 1
+
 # (list) Application requirements (clean minimal runtime: removed unused requests, urllib3, rich, idna, charset-normalizer, sqlite3)
 requirements = python3,kivy,openssl,certifi,yt-dlp,yt-dlp-ejs,mutagen,pyjnius
 
