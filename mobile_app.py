@@ -349,7 +349,7 @@ if KIVY_AVAILABLE:
             # Button Actions Row: PASTE & CLEAR
             btn_row = BoxLayout(orientation="horizontal", spacing=dp(10), size_hint_y=None, height=dp(38))
             paste_btn = Button(
-                text="📋 PASTE LINK",
+                text="PASTE LINK",
                 font_size="12sp",
                 bold=True,
                 background_color=(0.20, 0.26, 0.40, 1.0),
@@ -358,7 +358,7 @@ if KIVY_AVAILABLE:
             paste_btn.bind(on_press=self.on_paste_clicked)
 
             clear_btn = Button(
-                text="✕ CLEAR",
+                text="CLEAR",
                 font_size="12sp",
                 bold=True,
                 background_color=(0.18, 0.20, 0.28, 1.0),
@@ -395,12 +395,12 @@ if KIVY_AVAILABLE:
             format_card.add_widget(format_title)
 
             self.quality_spinner = Spinner(
-                text="Video (Best MP4 - Single Stream)",
+                text="Video (MP4 - Best Available)",
                 values=(
-                    "Video (Best MP4 - Single Stream)",
+                    "Video (MP4 - Best Available)",
                     "Video (720p HD MP4)",
-                    "Video (1080p Full HD MP4)",
-                    "Audio (MP3 / M4A Music)",
+                    "Video (360p Fast MP4)",
+                    "Audio Only (M4A / MP3 Music)",
                 ),
                 size_hint_y=None,
                 height=dp(42),
@@ -442,7 +442,7 @@ if KIVY_AVAILABLE:
             # 5. Prominent DOWNLOAD NOW Action Button
             # -------------------------------------------------------------
             self.download_btn = Button(
-                text="⬇  DOWNLOAD NOW",
+                text="DOWNLOAD NOW",
                 font_size="16sp",
                 bold=True,
                 background_color=(1.0, 0.65, 0.0, 1.0),  # Vivid Amber Gold
@@ -465,7 +465,7 @@ if KIVY_AVAILABLE:
                 bg_color=(0.07, 0.08, 0.13, 1.0),
             )
             self.storage_note = Label(
-                text=f"📁 Storage: Phone Storage / Download / YouTube",
+                text="Storage: Phone Storage > Download > YouTube",
                 font_size="11sp",
                 color=(0.55, 0.60, 0.70, 1.0),
             )
@@ -621,6 +621,14 @@ if KIVY_AVAILABLE:
                         "no_warnings": True,
                         "restrictfilenames": False,
                         "no_color": True,
+                        # Request android and web player clients to ensure YouTube serves
+                        # progressive formats (format 18 360p / format 22 720p) that have
+                        # audio and video in a single stream without requiring FFmpeg muxing.
+                        "extractor_args": {
+                            "youtube": {
+                                "player_client": ["android", "web", "mweb"]
+                            }
+                        },
                     }
 
                     if is_audio:
@@ -632,25 +640,22 @@ if KIVY_AVAILABLE:
                                 "preferredquality": "192",
                             }]
                         else:
-                            # Native M4A / AAC (plays natively on all Android devices without FFmpeg)
-                            ydl_opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
+                            # Format 140 is YouTube 128k AAC M4A audio stream (plays natively on Android)
+                            ydl_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio/18/best"
                     else:
                         if "720p" in selected_format:
                             if has_ffmpeg:
                                 ydl_opts["format"] = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
                             else:
-                                ydl_opts["format"] = "best[height<=720][ext=mp4]/best[ext=mp4]/best"
-                        elif "1080p" in selected_format:
-                            if has_ffmpeg:
-                                ydl_opts["format"] = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
-                            else:
-                                ydl_opts["format"] = "best[ext=mp4]/best"
+                                ydl_opts["format"] = "22/best[height<=720][ext=mp4]/18/best/bestvideo[height<=720]+bestaudio/best"
+                        elif "360p" in selected_format:
+                            ydl_opts["format"] = "18/best[height<=360][ext=mp4]/best[ext=mp4]/best"
                         else:
-                            # Best quality: if no FFmpeg, prioritize pre-merged MP4 for instant playback
+                            # Best Available: Prioritize progressive MP4 (format 18 / 22) for instant playback
                             if has_ffmpeg:
-                                ydl_opts["format"] = "bestvideo*+bestaudio/best"
+                                ydl_opts["format"] = "bestvideo*+bestaudio/22/18/best"
                             else:
-                                ydl_opts["format"] = "best[ext=mp4]/best"
+                                ydl_opts["format"] = "18/22/best[ext=mp4]/best/bestvideo*+bestaudio"
 
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         info = ydl.extract_info(url, download=True)
@@ -692,12 +697,19 @@ if KIVY_AVAILABLE:
                     import traceback
                     traceback.print_exc()
                     err_msg = str(e)
-                    if "ExtractorError" in err_msg or "not a valid URL" in err_msg:
+                    if "Requested format is not available" in err_msg:
+                        user_friendly_err = "Selected format not available for this video."
+                    elif "Video unavailable" in err_msg or "Private video" in err_msg:
+                        user_friendly_err = "Video is private or unavailable."
+                    elif "Sign in to confirm" in err_msg or "age-restricted" in err_msg:
+                        user_friendly_err = "Age-restricted video: sign-in required."
+                    elif "getaddrinfo failed" in err_msg or "timed out" in err_msg or "Network is unreachable" in err_msg:
+                        user_friendly_err = "Network error. Check internet connection."
+                    elif "ExtractorError" in err_msg or "not a valid URL" in err_msg:
                         user_friendly_err = "Invalid YouTube URL. Please check the link."
-                    elif "DownloadError" in err_msg:
-                        user_friendly_err = "Download failed. Check internet connection."
                     else:
-                        user_friendly_err = err_msg
+                        clean_err = err_msg.replace("ERROR: ", "").strip()
+                        user_friendly_err = clean_err if clean_err else "Download failed."
                     if len(user_friendly_err) > 75:
                         user_friendly_err = user_friendly_err[:72] + "..."
                     Clock.schedule_once(

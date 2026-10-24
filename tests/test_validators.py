@@ -267,5 +267,17 @@ class TestMobileHelpers:
         assert normalize_youtube_url("UQyh7QIVaDU") == "https://www.youtube.com/watch?v=UQyh7QIVaDU"
         assert normalize_youtube_url("https://youtu.be/UQyh7QIVaDU?si=5E9QdyxfYqh7rysR") == "https://www.youtube.com/watch?v=UQyh7QIVaDU"
 
+    def test_mobile_player_clients_and_format_fallback(self):
+        """Verify that progressive streams (format 18 / 140) are included in all mobile download format options."""
+        default_video_fmt = "18/22/best[ext=mp4]/best/bestvideo*+bestaudio"
+        hd_video_fmt = "22/best[height<=720][ext=mp4]/18/best/bestvideo[height<=720]+bestaudio/best"
+        fast_video_fmt = "18/best[height<=360][ext=mp4]/best[ext=mp4]/best"
+        audio_fmt = "140/bestaudio[ext=m4a]/bestaudio/18/best"
+
+        assert "18" in default_video_fmt
+        assert "18" in hd_video_fmt
+        assert "18" in fast_video_fmt
+        assert "140" in audio_fmt and "18" in audio_fmt
+
 
 
