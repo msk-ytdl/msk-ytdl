@@ -1,7 +1,7 @@
 """
 Mobile graphical interface entry point for MSK-YTDL on Android.
 Designed for touchscreen navigation, phone storage permissions, background downloading,
-and direct integration with Android's "Share from YouTube" SEND Intent.
+VidMate-style dark aesthetics, and direct integration with Android's "Share from YouTube" SEND Intent.
 """
 
 import os
@@ -11,6 +11,40 @@ import sys
 import threading
 from pathlib import Path
 from typing import Optional
+
+# Safe standard stream wrapper to protect against Android Logcat / Kivy buffer crashes
+class SafeLogStream:
+    def __init__(self, original_stream):
+        self._orig = original_stream
+
+    def write(self, msg):
+        if not msg:
+            return
+        try:
+            if self._orig and hasattr(self._orig, "write") and not isinstance(self._orig, str):
+                self._orig.write(str(msg))
+            else:
+                print(str(msg).rstrip())
+        except Exception:
+            pass
+
+    def flush(self):
+        try:
+            if self._orig and hasattr(self._orig, "flush"):
+                self._orig.flush()
+        except Exception:
+            pass
+
+    @property
+    def buffer(self):
+        return self
+
+
+# Wrap sys.stdout and sys.stderr if missing .write or if .buffer is a string
+if not hasattr(sys.stdout, "write") or isinstance(getattr(sys.stdout, "buffer", None), str):
+    sys.stdout = SafeLogStream(sys.stdout)
+if not hasattr(sys.stderr, "write") or isinstance(getattr(sys.stderr, "buffer", None), str):
+    sys.stderr = SafeLogStream(sys.stderr)
 
 # Guarantee SSL certificates are loaded on Android environments
 try:
@@ -25,11 +59,13 @@ try:
     from kivy.clock import Clock, mainthread
     from kivy.core.clipboard import Clipboard
     from kivy.core.window import Window
+    from kivy.graphics import Color, RoundedRectangle
     from kivy.metrics import dp
     from kivy.uix.boxlayout import BoxLayout
     from kivy.uix.button import Button
     from kivy.uix.label import Label
     from kivy.uix.progressbar import ProgressBar
+    from kivy.uix.scrollview import ScrollView
     from kivy.uix.spinner import Spinner
     from kivy.uix.textinput import TextInput
     KIVY_AVAILABLE = True
@@ -37,19 +73,78 @@ except ImportError:
     KIVY_AVAILABLE = False
 
 
-def extract_youtube_url(text: str) -> Optional[str]:
-    """Extract canonical YouTube link from raw shared text or clipboard."""
+class AndroidYTDLLogger:
+    """Safe custom logger for yt-dlp that routes messages without calling standard error streams."""
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg, only_once=False):
+        pass
+
+    def error(self, msg):
+        try:
+            print(f"[MSK-YTDL Log] {msg}")
+        except Exception:
+            pass
+
+
+def normalize_youtube_url(text: str) -> Optional[str]:
+    """
+    Robustly extract and canonicalize any YouTube link, query fragment, or video ID.
+    Handles:
+      - 'v=UQyh7QIVaDU&si=...'
+      - 'watch?v=UQyh7QIVaDU'
+      - 'UQyh7QIVaDU' (raw 11-char ID)
+      - 'https://youtu.be/UQyh7QIVaDU?si=...'
+      - 'https://www.youtube.com/watch?v=UQyh7QIVaDU'
+      - 'https://www.youtube.com/shorts/UQyh7QIVaDU'
+      - Text containing links shared from YouTube app
+    """
     if not text:
         return None
-    # 1. Look for standard YouTube video, shorts, or playlist links
-    yt_regex = r"(https?://(?:www\.|m\.)?(?:youtube\.com/watch\?v=[^&\s]+|youtu\.be/[^?\s]+|youtube\.com/shorts/[^?\s]+|youtube\.com/playlist\?list=[^&\s]+))"
-    match = re.search(yt_regex, text)
-    if match:
-        return match.group(1)
+    raw = text.strip()
 
-    # 2. Fallback to any general web URL in the text
-    general_match = re.search(r"(https?://[^\s]+)", text)
-    return general_match.group(1) if general_match else None
+    # 1. Full YouTube watch, youtu.be, or shorts URL with video ID
+    match_full = re.search(
+        r"https?://(?:www\.|m\.)?(?:youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})|youtu\.be/([a-zA-Z0-9_-]{11})|youtube\.com/shorts/([a-zA-Z0-9_-]{11}))",
+        raw,
+    )
+    if match_full:
+        vid = match_full.group(1) or match_full.group(2) or match_full.group(3)
+        return f"https://www.youtube.com/watch?v={vid}"
+
+    # 2. Playlist URL
+    match_plist = re.search(
+        r"(https?://(?:www\.|m\.)?youtube\.com/playlist\?list=[a-zA-Z0-9_-]+)",
+        raw,
+    )
+    if match_plist:
+        return match_plist.group(1)
+
+    # 3. Query fragment: 'v=UQyh7QIVaDU' or 'watch?v=UQyh7QIVaDU'
+    match_query = re.search(r"(?:watch\?)?v=([a-zA-Z0-9_-]{11})", raw)
+    if match_query:
+        return f"https://www.youtube.com/watch?v={match_query.group(1)}"
+
+    # 4. Raw 11-character video ID alone (e.g. 'UQyh7QIVaDU')
+    match_raw_id = re.match(r"^[a-zA-Z0-9_-]{11}$", raw)
+    if match_raw_id:
+        return f"https://www.youtube.com/watch?v={raw}"
+
+    # 5. General web link fallback
+    match_gen = re.search(r"(https?://[^\s]+)", raw)
+    if match_gen:
+        return match_gen.group(1)
+
+    return None
+
+
+def extract_youtube_url(text: str) -> Optional[str]:
+    """Compatibility alias for normalize_youtube_url."""
+    return normalize_youtube_url(text)
 
 
 def format_bytes(num_bytes: Optional[float]) -> str:
@@ -144,10 +239,26 @@ def scan_media_file(filepath: Path):
 
 
 if KIVY_AVAILABLE:
+    class StyledCard(BoxLayout):
+        """Card widget with rounded background and subtle dark-mode styling."""
+        def __init__(self, bg_color=(0.10, 0.12, 0.18, 1.0), radius=12, **kwargs):
+            super().__init__(**kwargs)
+            self.bg_color = bg_color
+            self.radius = radius
+            with self.canvas.before:
+                Color(*self.bg_color)
+                self.rect = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(self.radius)])
+            self.bind(pos=self._update_rect, size=self._update_rect)
+
+        def _update_rect(self, *args):
+            self.rect.pos = self.pos
+            self.rect.size = self.size
+
+
     class MSKDownloaderMobile(App):
         def build(self):
             self.title = "MSK Video Downloader"
-            Window.clearcolor = (0.05, 0.06, 0.09, 1.0)  # Sleek dark VidMate background
+            Window.clearcolor = (0.05, 0.06, 0.09, 1.0)  # Deep obsidian dark mode
 
             # Request Android storage permissions on startup
             request_android_permissions()
@@ -159,126 +270,232 @@ if KIVY_AVAILABLE:
             except Exception:
                 pass
 
-            root = BoxLayout(orientation="vertical", padding=dp(16), spacing=dp(12))
+            # Root ScrollView to ensure all screen sizes render with perfect spacing
+            scroll_root = ScrollView(do_scroll_x=False, do_scroll_y=True)
 
-            # Header / Logo Title
-            header = Label(
-                text="[b][color=#FFB300]MSK[/color] Video Downloader[/b]",
-                markup=True,
-                font_size="22sp",
+            content = BoxLayout(
+                orientation="vertical",
+                padding=[dp(16), dp(20), dp(16), dp(24)],
+                spacing=dp(14),
                 size_hint_y=None,
-                height=dp(44),
             )
-            root.add_widget(header)
+            content.bind(minimum_height=content.setter("height"))
 
-            subtitle = Label(
-                text="Paste link or tap 'Share' in YouTube to download",
+            # -------------------------------------------------------------
+            # 1. Header Card (VidMate Aesthetics)
+            # -------------------------------------------------------------
+            header_card = StyledCard(
+                orientation="vertical",
+                padding=[dp(16), dp(16)],
+                spacing=dp(4),
+                size_hint_y=None,
+                height=dp(80),
+                bg_color=(0.09, 0.11, 0.17, 1.0),
+            )
+            brand_label = Label(
+                text="[b][color=#FFB300]MSK[/color] VIDMATE[/b]",
+                markup=True,
+                font_size="24sp",
+                size_hint_y=None,
+                height=dp(32),
+            )
+            tagline = Label(
+                text="Fast & Free YouTube Video & Audio Downloader",
                 font_size="12sp",
-                color=(0.65, 0.68, 0.75, 1.0),
+                color=(0.7, 0.75, 0.85, 1.0),
                 size_hint_y=None,
                 height=dp(20),
             )
-            root.add_widget(subtitle)
+            header_card.add_widget(brand_label)
+            header_card.add_widget(tagline)
+            content.add_widget(header_card)
 
-            # URL Input Box with PASTE & CLEAR Buttons
-            url_row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(48), spacing=dp(6))
+            # -------------------------------------------------------------
+            # 2. URL Input Card with PASTE and CLEAR Buttons
+            # -------------------------------------------------------------
+            input_card = StyledCard(
+                orientation="vertical",
+                padding=[dp(14), dp(14)],
+                spacing=dp(10),
+                size_hint_y=None,
+                height=dp(146),
+                bg_color=(0.09, 0.11, 0.17, 1.0),
+            )
+            input_title = Label(
+                text="[b]YouTube Video Link[/b]",
+                markup=True,
+                font_size="13sp",
+                color=(0.9, 0.9, 0.95, 1.0),
+                size_hint_y=None,
+                height=dp(20),
+                halign="left",
+            )
+            input_title.bind(size=input_title.setter("text_size"))
+            input_card.add_widget(input_title)
+
             self.url_input = TextInput(
-                hint_text="Paste YouTube URL here...",
+                hint_text="Paste YouTube link here or tap Share in YouTube...",
                 multiline=False,
                 font_size="14sp",
-                size_hint_x=0.72,
-                background_color=(0.12, 0.14, 0.20, 1.0),
+                size_hint_y=None,
+                height=dp(46),
+                background_color=(0.14, 0.16, 0.24, 1.0),
                 foreground_color=(1, 1, 1, 1),
-                cursor_color=(1, 0.7, 0, 1),
+                cursor_color=(1, 0.75, 0, 1),
+                padding=[dp(10), dp(12)],
             )
+            input_card.add_widget(self.url_input)
+
+            # Button Actions Row: PASTE & CLEAR
+            btn_row = BoxLayout(orientation="horizontal", spacing=dp(10), size_hint_y=None, height=dp(38))
             paste_btn = Button(
-                text="PASTE",
+                text="📋 PASTE LINK",
                 font_size="12sp",
                 bold=True,
-                size_hint_x=0.28,
-                background_color=(0.20, 0.24, 0.35, 1.0),
+                background_color=(0.20, 0.26, 0.40, 1.0),
                 color=(1, 0.75, 0, 1),
             )
             paste_btn.bind(on_press=self.on_paste_clicked)
-            url_row.add_widget(self.url_input)
-            url_row.add_widget(paste_btn)
-            root.add_widget(url_row)
 
-            # Format / Quality Selector
-            selector_box = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(42), spacing=dp(8))
-            selector_label = Label(text="Format:", size_hint_x=0.32, font_size="13sp", color=(0.8, 0.8, 0.8, 1))
-            self.quality_spinner = Spinner(
-                text="Video (Best MP4)",
-                values=(
-                    "Video (Best MP4)",
-                    "Video (720p HD)",
-                    "Video (1080p Full HD)",
-                    "Audio (Music / Song)",
-                ),
-                size_hint_x=0.68,
+            clear_btn = Button(
+                text="✕ CLEAR",
+                font_size="12sp",
+                bold=True,
                 background_color=(0.18, 0.20, 0.28, 1.0),
-                color=(1, 1, 1, 1),
+                color=(0.8, 0.85, 0.95, 1),
             )
-            selector_box.add_widget(selector_label)
-            selector_box.add_widget(self.quality_spinner)
-            root.add_widget(selector_box)
+            clear_btn.bind(on_press=self.on_clear_clicked)
 
-            # Progress Bar
-            self.progress_bar = ProgressBar(max=100, value=0, size_hint_y=None, height=dp(16))
-            root.add_widget(self.progress_bar)
+            btn_row.add_widget(paste_btn)
+            btn_row.add_widget(clear_btn)
+            input_card.add_widget(btn_row)
+            content.add_widget(input_card)
 
-            # Status Message Card
+            # -------------------------------------------------------------
+            # 3. Format & Quality Selector Card
+            # -------------------------------------------------------------
+            format_card = StyledCard(
+                orientation="vertical",
+                padding=[dp(14), dp(14)],
+                spacing=dp(8),
+                size_hint_y=None,
+                height=dp(95),
+                bg_color=(0.09, 0.11, 0.17, 1.0),
+            )
+            format_title = Label(
+                text="[b]Select Format & Quality[/b]",
+                markup=True,
+                font_size="13sp",
+                color=(0.9, 0.9, 0.95, 1.0),
+                size_hint_y=None,
+                height=dp(20),
+                halign="left",
+            )
+            format_title.bind(size=format_title.setter("text_size"))
+            format_card.add_widget(format_title)
+
+            self.quality_spinner = Spinner(
+                text="Video (Best MP4 - Single Stream)",
+                values=(
+                    "Video (Best MP4 - Single Stream)",
+                    "Video (720p HD MP4)",
+                    "Video (1080p Full HD MP4)",
+                    "Audio (MP3 / M4A Music)",
+                ),
+                size_hint_y=None,
+                height=dp(42),
+                background_color=(0.16, 0.19, 0.28, 1.0),
+                color=(1, 1, 1, 1),
+                font_size="13sp",
+            )
+            format_card.add_widget(self.quality_spinner)
+            content.add_widget(format_card)
+
+            # -------------------------------------------------------------
+            # 4. Progress & Status Card
+            # -------------------------------------------------------------
+            status_card = StyledCard(
+                orientation="vertical",
+                padding=[dp(14), dp(12)],
+                spacing=dp(8),
+                size_hint_y=None,
+                height=dp(88),
+                bg_color=(0.09, 0.11, 0.17, 1.0),
+            )
+            self.progress_bar = ProgressBar(max=100, value=0, size_hint_y=None, height=dp(14))
+            status_card.add_widget(self.progress_bar)
+
             self.status_label = Label(
-                text="Ready. Paste a link or share from YouTube.",
+                text="Ready. Paste a link or tap 'Share' from YouTube.",
                 markup=True,
                 font_size="12sp",
-                color=(0.85, 0.85, 0.85, 1.0),
+                color=(0.85, 0.88, 0.95, 1.0),
                 size_hint_y=None,
-                height=dp(50),
+                height=dp(42),
+                halign="center",
             )
-            root.add_widget(self.status_label)
+            self.status_label.bind(size=self.status_label.setter("text_size"))
+            status_card.add_widget(self.status_label)
+            content.add_widget(status_card)
 
-            # Download Action Button
+            # -------------------------------------------------------------
+            # 5. Prominent DOWNLOAD NOW Action Button
+            # -------------------------------------------------------------
             self.download_btn = Button(
-                text="DOWNLOAD NOW",
+                text="⬇  DOWNLOAD NOW",
                 font_size="16sp",
                 bold=True,
-                background_color=(1.0, 0.65, 0.0, 1.0),  # Vivid Amber
-                color=(0.05, 0.05, 0.05, 1.0),
+                background_color=(1.0, 0.65, 0.0, 1.0),  # Vivid Amber Gold
+                color=(0.04, 0.05, 0.08, 1.0),
                 size_hint_y=None,
-                height=dp(50),
+                height=dp(54),
             )
             self.download_btn.bind(on_press=self.start_download)
-            root.add_widget(self.download_btn)
+            content.add_widget(self.download_btn)
 
-            # Destination note
+            # -------------------------------------------------------------
+            # 6. Storage Destination Card
+            # -------------------------------------------------------------
             download_dir = get_android_download_dir()
-            self.storage_note = Label(
-                text=f"Destination: {download_dir.name}",
-                font_size="11sp",
-                color=(0.5, 0.55, 0.65, 1.0),
+            dest_card = StyledCard(
+                orientation="horizontal",
+                padding=[dp(12), dp(8)],
                 size_hint_y=None,
-                height=dp(24),
+                height=dp(38),
+                bg_color=(0.07, 0.08, 0.13, 1.0),
             )
-            root.add_widget(self.storage_note)
+            self.storage_note = Label(
+                text=f"📁 Storage: Phone Storage / Download / YouTube",
+                font_size="11sp",
+                color=(0.55, 0.60, 0.70, 1.0),
+            )
+            dest_card.add_widget(self.storage_note)
+            content.add_widget(dest_card)
+
+            scroll_root.add_widget(content)
 
             # Check for incoming YouTube Share intent on cold startup
             Clock.schedule_once(self.check_initial_intent, 0.4)
 
-            return root
+            return scroll_root
 
         def on_paste_clicked(self, instance):
             """Handle PASTE button press from Android system clipboard."""
             try:
                 clip_text = Clipboard.paste()
                 if clip_text:
-                    url = extract_youtube_url(clip_text.strip()) or clip_text.strip()
-                    self.url_input.text = url
-                    self.update_status("[color=#FFB300]Link pasted![/color] Tap DOWNLOAD NOW.", 0)
+                    normalized = normalize_youtube_url(clip_text.strip()) or clip_text.strip()
+                    self.url_input.text = normalized
+                    self.update_status("[color=#FFB300]Link pasted & cleaned![/color] Tap DOWNLOAD NOW.", 0)
                 else:
                     self.update_status("Clipboard is empty.", 0)
             except Exception as e:
                 self.update_status(f"Paste notice: {e}", 0)
+
+        def on_clear_clicked(self, instance):
+            """Clear input and reset status."""
+            self.url_input.text = ""
+            self.update_status("Ready. Paste a link or tap 'Share' from YouTube.", 0)
 
         @mainthread
         def on_new_intent(self, intent):
@@ -314,9 +531,9 @@ if KIVY_AVAILABLE:
                 if action == Intent.ACTION_SEND and type_ and "text" in type_:
                     shared_text = intent.getStringExtra(Intent.EXTRA_TEXT)
                     if shared_text:
-                        url = extract_youtube_url(shared_text)
-                        if url:
-                            self.url_input.text = url
+                        normalized = normalize_youtube_url(shared_text)
+                        if normalized:
+                            self.url_input.text = normalized
                             self.update_status(
                                 "[color=#FFB300]Received from YouTube![/color] Tap DOWNLOAD NOW.", 0
                             )
@@ -326,9 +543,9 @@ if KIVY_AVAILABLE:
                 if action == Intent.ACTION_VIEW:
                     data = intent.getData()
                     if data:
-                        url = extract_youtube_url(data.toString())
-                        if url:
-                            self.url_input.text = url
+                        normalized = normalize_youtube_url(data.toString())
+                        if normalized:
+                            self.url_input.text = normalized
                             self.update_status(
                                 "[color=#FFB300]Received YouTube link![/color] Tap DOWNLOAD NOW.", 0
                             )
@@ -342,13 +559,17 @@ if KIVY_AVAILABLE:
 
         def start_download(self, instance):
             raw_text = self.url_input.text.strip()
-            url = extract_youtube_url(raw_text) or raw_text
+            # Normalize URL to handle 'v=...', 'watch?v=...', raw IDs, and share messages
+            url = normalize_youtube_url(raw_text)
             if not url:
-                self.update_status("[color=#FF5252]Please enter or paste a YouTube link![/color]")
+                self.update_status("[color=#FF5252]Please enter a valid YouTube link or video ID![/color]")
                 return
 
+            # Keep input updated with normalized URL
+            self.url_input.text = url
+
             self.download_btn.disabled = True
-            self.update_status("Starting connection...", 5)
+            self.update_status("Connecting to video stream...", 5)
 
             selected_format = self.quality_spinner.text
             is_audio = "Audio" in selected_format
@@ -361,7 +582,7 @@ if KIVY_AVAILABLE:
                     target_dir.mkdir(parents=True, exist_ok=True)
 
                     Clock.schedule_once(
-                        lambda dt: self.update_status(f"Resolving video stream...", 15)
+                        lambda dt: self.update_status("Resolving streams & metadata...", 15)
                     )
 
                     # Progress callback to animate Kivy ProgressBar
@@ -385,18 +606,21 @@ if KIVY_AVAILABLE:
 
                     has_ffmpeg = bool(shutil.which("ffmpeg"))
 
-                    # Template output filename
-                    outtmpl = str(target_dir / "%(title).100B [%(id)s].%(ext)s")
+                    # Safe output template without special shell characters
+                    outtmpl = str(target_dir / "%(title).80B [%(id)s].%(ext)s")
 
-                    # Configure yt-dlp options specifically tailored for Android stability
+                    # Configure yt-dlp with safe custom logger to prevent Android buffer write errors
+                    safe_logger = AndroidYTDLLogger()
                     ydl_opts = {
                         "outtmpl": outtmpl,
                         "progress_hooks": [progress_hook],
-                        "socket_timeout": 30,
+                        "logger": safe_logger,
+                        "socket_timeout": 35,
                         "nocheckcertificate": False,
                         "quiet": True,
                         "no_warnings": True,
                         "restrictfilenames": False,
+                        "no_color": True,
                     }
 
                     if is_audio:
@@ -468,10 +692,16 @@ if KIVY_AVAILABLE:
                     import traceback
                     traceback.print_exc()
                     err_msg = str(e)
-                    if len(err_msg) > 70:
-                        err_msg = err_msg[:67] + "..."
+                    if "ExtractorError" in err_msg or "not a valid URL" in err_msg:
+                        user_friendly_err = "Invalid YouTube URL. Please check the link."
+                    elif "DownloadError" in err_msg:
+                        user_friendly_err = "Download failed. Check internet connection."
+                    else:
+                        user_friendly_err = err_msg
+                    if len(user_friendly_err) > 75:
+                        user_friendly_err = user_friendly_err[:72] + "..."
                     Clock.schedule_once(
-                        lambda dt, err=err_msg: self.update_status(
+                        lambda dt, err=user_friendly_err: self.update_status(
                             f"[color=#FF5252]Error:[/color] {err}", 0
                         )
                     )

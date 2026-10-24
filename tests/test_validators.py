@@ -243,21 +243,29 @@ class TestMobileHelpers:
     def test_extract_pure_youtube_urls(self):
         from mobile_app import extract_youtube_url
         assert extract_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ") == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-        assert extract_youtube_url("https://youtu.be/9bZkp7q19f0") == "https://youtu.be/9bZkp7q19f0"
-        assert extract_youtube_url("https://www.youtube.com/shorts/L_LUpnjgPso") == "https://www.youtube.com/shorts/L_LUpnjgPso"
+        assert extract_youtube_url("https://youtu.be/9bZkp7q19f0") == "https://www.youtube.com/watch?v=9bZkp7q19f0"
+        assert extract_youtube_url("https://www.youtube.com/shorts/L_LUpnjgPso") == "https://www.youtube.com/watch?v=L_LUpnjgPso"
 
     def test_extract_url_from_youtube_share_text(self):
         from mobile_app import extract_youtube_url
         share_text = "Check out this song on YouTube: https://youtu.be/dQw4w9WgXcQ it is amazing!"
-        assert extract_youtube_url(share_text) == "https://youtu.be/dQw4w9WgXcQ"
+        assert extract_youtube_url(share_text) == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
         shorts_share = "Awesome short https://www.youtube.com/shorts/L_LUpnjgPso watch now"
-        assert extract_youtube_url(shorts_share) == "https://www.youtube.com/shorts/L_LUpnjgPso"
+        assert extract_youtube_url(shorts_share) == "https://www.youtube.com/watch?v=L_LUpnjgPso"
 
     def test_extract_url_empty_or_invalid(self):
         from mobile_app import extract_youtube_url
         assert extract_youtube_url("") is None
         assert extract_youtube_url(None) is None
         assert extract_youtube_url("Hello world without link") is None
+
+    def test_normalize_query_fragments_and_video_ids(self):
+        from mobile_app import normalize_youtube_url
+        assert normalize_youtube_url("v=UQyh7QIVaDU&si=5E9QdyxfYqh7rysR") == "https://www.youtube.com/watch?v=UQyh7QIVaDU"
+        assert normalize_youtube_url("watch?v=UQyh7QIVaDU") == "https://www.youtube.com/watch?v=UQyh7QIVaDU"
+        assert normalize_youtube_url("UQyh7QIVaDU") == "https://www.youtube.com/watch?v=UQyh7QIVaDU"
+        assert normalize_youtube_url("https://youtu.be/UQyh7QIVaDU?si=5E9QdyxfYqh7rysR") == "https://www.youtube.com/watch?v=UQyh7QIVaDU"
+
 
 
