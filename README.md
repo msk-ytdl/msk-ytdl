@@ -1,6 +1,7 @@
-# MSK-YTDL: Reliable Python CLI YouTube Video Downloader
+# MSK YTDL: Reliable YouTube Video & Audio Downloader
+Developed by **MSK Software Solutions**
 
-A robust, production-quality, command-line application built with Python, [`yt-dlp`](https://github.com/yt-dlp/yt-dlp), and [`Rich`](https://github.com/Textualize/rich). Designed for reliability, clear diagnostics, error recovery, and seamless Windows support.
+A robust, production-quality application built with Python, [`yt-dlp`](https://github.com/yt-dlp/yt-dlp), and [`Rich`](https://github.com/Textualize/rich). Designed for reliability, clear diagnostics, error recovery, and seamless Android and Windows support.
 
 ---
 
@@ -19,9 +20,9 @@ If access to media is restricted, please use the platform's authorized website, 
 
 ## Key Features
 
-* **Triple Interface:** Polished interactive terminal menu with 15 numbered options, modern VidMate-style browser web application, and direct CLI flags for power users and automation.
-* **Local VidMate-Style Web App:** Built-in web server (`run_web.bat` or `--web`) that launches a responsive dark-mode browser UI accessible on your PC (`http://localhost:8899`) or across your local Wi-Fi on Android phones and tablets!
-* **Standalone Windows Executable & Portable Packager:** 1-click builder (`build_exe.bat` or Option 14) that compiles a standalone `MSK-YTDL.exe`, bundles `ffmpeg.exe` and `ffprobe.exe`, and generates a ready-to-share `MSK-YTDL-Windows-x64.zip` file for friends (no Python or FFmpeg installation needed on their PC).
+* **Triple Interface:** Polished interactive terminal menu with 15 numbered options, modern MSK YTDL browser web application, and direct CLI flags for power users and automation.
+* **Local MSK YTDL Web App:** Built-in web server (`run_web.bat` or `--web`) that launches a responsive dark-mode browser UI accessible on your PC (`http://localhost:8899`) or across your local Wi-Fi on Android phones and tablets!
+* **Standalone Windows Executable & Portable Packager:** 1-click builder (`build_exe.bat` or Option 14) that compiles a standalone `MSK-YTDL.exe` signed by **MSK Software Solutions**, bundles `ffmpeg.exe` and `ffprobe.exe`, and generates a ready-to-share `MSK-YTDL-Windows-x64.zip` file for friends (no Python or FFmpeg installation needed on their PC).
 * **Android APK Cloud Compilation & Mobile Support:** Turnkey GitHub Actions workflow (`.github/workflows/build-apk.yml`) to compile true Android `.apk` files for free in the cloud, plus an instant 1-click Termux setup script (`install_android.sh`) to run natively on Android phones with downloads saving directly to `/sdcard/Download/YouTube`.
 * **Full Playlist Downloads:** Download complete YouTube playlists as video or MP3 audio with automatic folder organization (`<Playlist Title>/`), configurable item ranges (`--playlist-start`, `--playlist-end`), or custom item selectors (`--playlist-items '1,3-5,8'`).
 * **Multi-Video Batch Downloading:** Process multiple individual video URLs in a single run with per-item error isolation via CLI arguments (`--urls ...`) or from a plain text file (`--batch-file urls.txt`).
@@ -149,7 +150,7 @@ You will be greeted by the interactive terminal interface:
   12. Change Download Folder
   13. Open Download Folder in File Explorer
   14. Package for Friends (Windows .EXE / Android APK Guide)
-  15. Launch Web UI (VidMate-Style Mobile/Browser App)
+  15. Launch Web UI (MSK YTDL Mobile/Browser App)
   0. Exit
 
 Select an option:
@@ -259,7 +260,7 @@ run.bat --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" --output-dir "D:/Arc
 run.bat --package-windows
 ```
 
-#### P. Launch Local Web UI (VidMate-Style Mobile/Browser App)
+#### P. Launch Local Web UI (MSK YTDL Mobile/Browser App)
 Start the built-in local server and open your browser at `http://localhost:8899` (or open the displayed Wi-Fi URL on your Android phone/tablet):
 ```powershell
 # Double-click or run the batch launcher:
@@ -370,7 +371,7 @@ Test coverage includes:
 * **Smart archive & skip mechanics:** Checking record logs, handling archive hits without failure, custom archive path routing.
 * **Audio cover art & metadata pipeline:** FFmpeg thumbnail conversion (`webp` -> `jpg`), `EmbedThumbnail`, `FFmpegMetadata`, ID3 tagging.
 * **Standalone packager & CLI:** `--package-windows` argument parsing and runner integration, bundled FFmpeg fallback detection.
-* **VidMate Web Application & REST API:** Thread-safe job manager, status diagnostics, inspection endpoints, local IP resolution, and static asset serving.
+* **MSK YTDL Web Application & REST API:** Thread-safe job manager, status diagnostics, inspection endpoints, local IP resolution, and static asset serving.
 * **Downloader mechanics:** Format selector generation for all resolution tiers, yt-dlp option dictionaries, resume support.
 * **Playlist & Batch engine:** Error isolation, range filtering, subfolder generation, progress tracking, and tabular reporting.
 * **Audio conversion:** MP3 postprocessor options, missing FFmpeg detection.
@@ -397,6 +398,14 @@ Test coverage includes:
 ### 4. `The provided URL points to a full playlist, not a single video`
 * **Cause:** A playlist URL was provided (`/playlist?list=...`).
 * **Fix:** Supply a URL pointing directly to an individual video. If you pasted a watch URL with playlist parameters (`&list=...`), MSK-YTDL will automatically sanitize and download only the single target video.
+
+### 5. Android: `Harmful app blocked` or `Blocked by Play Protect`
+* **Cause:** Google Play Store policies do not allow YouTube downloaders. Therefore, Google Play Protect displays a generic warning when sideloading direct APKs.
+* **Fix:** In the Play Protect popup, tap **"More details"** (or "Details") and then tap **"Install anyway"**. The APK is built and signed by MSK Software Solutions with zero trackers and zero ads.
+
+### 6. Windows: `Windows protected your PC` (Microsoft Defender SmartScreen)
+* **Cause:** SmartScreen displays this alert on new open-source executables that have not yet accumulated thousands of downloads in Microsoft's telemetry database.
+* **Fix:** Click **"More info"** and then click **"Run anyway"**. To permanently trust MSK Software Solutions on your PC, right-click `Install_MSK_Certificate.bat` inside the portable folder and select **Run as administrator**.
 
 ---
 

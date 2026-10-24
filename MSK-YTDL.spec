@@ -43,6 +43,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    version='windows_version_info.txt',
 )
 coll = COLLECT(
     exe,

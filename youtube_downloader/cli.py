@@ -459,7 +459,7 @@ def interactive_menu(config: AppConfig, debug: bool = False) -> None:
         console.print("  [bold]12.[/bold] Change Download Folder")
         console.print("  [bold]13.[/bold] Open Download Folder in File Explorer")
         console.print("  [bold]14.[/bold] Package for Friends (Windows .EXE / Android APK Guide)")
-        console.print("  [bold]15.[/bold] Launch Web UI (VidMate-Style Mobile/Browser App)")
+        console.print("  [bold]15.[/bold] Launch Web UI (MSK YTDL Mobile/Browser App)")
         console.print("  [bold]0.[/bold] Exit")
         console.print()
 
@@ -723,7 +723,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--web",
         action="store_true",
-        help="Launch the local VidMate-style browser web application."
+        help="Launch the local MSK YTDL browser web application by MSK Software Solutions."
     )
     parser.add_argument(
         "--port",

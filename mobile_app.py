@@ -1,7 +1,8 @@
 """
-Mobile graphical interface entry point for MSK-YTDL on Android.
+Mobile graphical interface entry point for MSK YTDL on Android.
+Publisher: MSK Software Solutions
 Designed for touchscreen navigation, phone storage permissions, background downloading,
-VidMate-style dark aesthetics, and direct integration with Android's "Share from YouTube" SEND Intent.
+modern dark aesthetics, and direct integration with Android's "Share from YouTube" SEND Intent.
 """
 
 import os
@@ -257,7 +258,7 @@ if KIVY_AVAILABLE:
 
     class MSKDownloaderMobile(App):
         def build(self):
-            self.title = "MSK Video Downloader"
+            self.title = "MSK YTDL"
             Window.clearcolor = (0.05, 0.06, 0.09, 1.0)  # Deep obsidian dark mode
 
             # Request Android storage permissions on startup
@@ -282,7 +283,7 @@ if KIVY_AVAILABLE:
             content.bind(minimum_height=content.setter("height"))
 
             # -------------------------------------------------------------
-            # 1. Header Card (VidMate Aesthetics)
+            # 1. Header Card (MSK YTDL Branding)
             # -------------------------------------------------------------
             header_card = StyledCard(
                 orientation="vertical",
@@ -293,14 +294,14 @@ if KIVY_AVAILABLE:
                 bg_color=(0.09, 0.11, 0.17, 1.0),
             )
             brand_label = Label(
-                text="[b][color=#FFB300]MSK[/color] VIDMATE[/b]",
+                text="[b][color=#FFB300]MSK[/color] YTDL[/b]",
                 markup=True,
                 font_size="24sp",
                 size_hint_y=None,
                 height=dp(32),
             )
             tagline = Label(
-                text="Fast & Free YouTube Video & Audio Downloader",
+                text="YouTube Downloader by MSK Software Solutions",
                 font_size="12sp",
                 color=(0.7, 0.75, 0.85, 1.0),
                 size_hint_y=None,

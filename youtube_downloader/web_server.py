@@ -1,6 +1,7 @@
 """
-Built-in local web server and REST API for MSK-YTDL.
-Provides a responsive VidMate-style browser interface accessible on PC and mobile devices over Wi-Fi.
+Built-in local web server and REST API for MSK YTDL.
+Publisher: MSK Software Solutions
+Provides a responsive MSK YTDL browser interface accessible on PC and mobile devices over Wi-Fi.
 """
 
 import json
@@ -398,7 +399,7 @@ def run_web_server(port: int = 8899, open_browser: bool = True) -> None:
 
     console.print()
     console.print("=" * 64)
-    console.print("[bold yellow]  MSK-YTDL: VidMate-Style Modern Web GUI[/bold yellow]")
+    console.print("[bold yellow]  MSK YTDL: Modern Web GUI by MSK Software Solutions[/bold yellow]")
     console.print("=" * 64)
     console.print(f"  [bold green]Local PC Access:[/bold green]     {local_url}")
     console.print(f"  [bold cyan]Mobile / Wi-Fi Access:[/bold cyan] {network_url}")

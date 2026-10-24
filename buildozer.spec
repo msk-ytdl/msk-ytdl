@@ -1,13 +1,13 @@
 [app]
 
 # (str) Title of your application
-title = MSK Video Downloader
+title = MSK YTDL
 
 # (str) Package name
 package.name = mskytdl
 
 # (str) Package domain (needed for android/ios packaging)
-package.domain = org.mskinstitute
+package.domain = com.msksoftwaresolutions
 
 # (str) Source code where the main.py lives
 source.dir = .
@@ -28,8 +28,8 @@ requirements = python3,kivy,openssl,sqlite3,requests,urllib3,certifi,idna,charse
 # (str) Supported orientation (one of landscape, sensorLandscape, portrait or all)
 orientation = portrait
 
-# (list) Permissions
-android.permissions = INTERNET,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE,ACCESS_NETWORK_STATE,MANAGE_EXTERNAL_STORAGE,READ_MEDIA_VIDEO,READ_MEDIA_AUDIO
+# (list) Permissions (safe standard permissions; MANAGE_EXTERNAL_STORAGE excluded to prevent Play Protect harmful warning)
+android.permissions = INTERNET,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE,ACCESS_NETWORK_STATE,READ_MEDIA_VIDEO,READ_MEDIA_AUDIO
 
 # (str) XML file to include as an intent filters in <activity> tag (enables "Share from YouTube")
 android.manifest.intent_filters = intent_filters.xml

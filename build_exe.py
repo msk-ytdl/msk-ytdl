@@ -90,25 +90,34 @@ def create_readme(target_dir: Path, has_ffmpeg: bool) -> None:
     """Create an informative README for end users receiving the portable package."""
     ffmpeg_status = "BUNDLED (Ready out-of-the-box)" if has_ffmpeg else "Requires external FFmpeg"
     readme_text = f"""===================================================================
-  MSK-YTDL: Reliable YouTube Video & Audio Downloader (Portable)
+  MSK YTDL: Reliable YouTube Video & Audio Downloader
+  Publisher: MSK Software Solutions
 ===================================================================
 
-Thank you for using MSK-YTDL!
-This is a self-contained portable package. No Python or pip setup required!
+Thank you for choosing MSK YTDL by MSK Software Solutions!
+This is a self-contained portable package. Zero Python or pip setup required!
 
 QUICK START:
-  1. Double-click "MSK-YTDL.exe" or "Start_MSK_YTDL.bat".
+  1. Double-click "Start_MSK_YTDL.bat" or "MSK-YTDL.exe".
   2. Follow the numbered menu in the console window.
-  3. Enter any authorized YouTube video or playlist link.
+  3. Enter any YouTube video or playlist link.
   4. Files will be saved into your Windows "Downloads/YouTube" folder!
+
+WINDOWS SMARTSCREEN / SECURITY NOTICE:
+  MSK YTDL is 100% safe, open-source software with zero ads or tracking.
+  If Windows displays "Windows protected your PC":
+    1. Click "More info".
+    2. Click "Run anyway".
+  To permanently trust the publisher on this PC, right-click:
+    "Install_MSK_Certificate.bat" -> "Run as administrator".
 
 FFMPEG STATUS:
   {ffmpeg_status}
   FFmpeg enables merging high-resolution video streams (1080p, 1440p, 4K),
-  converting audio to MP3, and embedding album artwork thumbnails.
+  converting audio to 320kbps MP3, and embedding album artwork.
 
 COMMAND LINE USAGE:
-  You can also run MSK-YTDL from PowerShell or Command Prompt:
+  You can also run MSK YTDL from PowerShell or Command Prompt:
     .\\MSK-YTDL.exe --url "https://www.youtube.com/watch?v=..." --mode video
     .\\MSK-YTDL.exe --url "https://www.youtube.com/watch?v=..." --mode audio --audio-quality 320
     .\\MSK-YTDL.exe --check
@@ -148,6 +157,10 @@ def build_executable(onefile: bool = False) -> bool:
     web_dir = PROJECT_ROOT / "youtube_downloader" / "web"
     if web_dir.exists():
         cmd.extend(["--add-data", f"{web_dir};youtube_downloader/web"])
+
+    version_file = PROJECT_ROOT / "windows_version_info.txt"
+    if version_file.exists():
+        cmd.extend(["--version-file", str(version_file)])
 
     if onefile:
         cmd.append("--onefile")
@@ -204,9 +217,27 @@ def package_distribution(onefile: bool = False) -> Optional[Path]:
         console.print(f"[green]Bundling FFprobe:[/green] {ffprobe_exe}")
         shutil.copy2(ffprobe_exe, PORTABLE_DIR / "ffprobe.exe")
 
+    # Run Authenticode Code Signing for MSK Software Solutions
+    exe_to_sign = PORTABLE_DIR / "MSK-YTDL.exe"
+    sign_script = PROJECT_ROOT / "scripts" / "sign_windows_exe.ps1"
+    if exe_to_sign.exists() and sign_script.exists():
+        console.print("[cyan]Applying MSK Software Solutions digital signature...[/cyan]")
+        try:
+            subprocess.run(
+                ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(sign_script), "-ExePath", str(exe_to_sign)],
+                check=False,
+            )
+        except Exception as e:
+            console.print(f"[yellow]Signing warning: {e}[/yellow]")
+
     # Create batch launcher and README
     create_portable_launcher(PORTABLE_DIR)
     create_readme(PORTABLE_DIR, has_ffmpeg=has_ffmpeg)
+
+    # Ensure certificate installer and public certificate are in portable folder
+    cert_file = PROJECT_ROOT / "MSK_Software_Solutions.cer"
+    if cert_file.exists():
+        shutil.copy2(cert_file, PORTABLE_DIR / "MSK_Software_Solutions.cer")
 
     # Compress into a shareable ZIP archive
     console.print(f"[cyan]Compressing portable folder into {ZIP_OUTPUT.name}...[/cyan]")

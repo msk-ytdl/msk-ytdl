@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title MSK-YTDL: VidMate Web App
+title MSK YTDL: Web App - MSK Software Solutions
 cd /d "%~dp0"
 
 echo =========================================================
-echo   MSK-YTDL: VidMate-Style Modern Web Application
+echo   MSK YTDL: Web Application by MSK Software Solutions
 echo   Starting local server and opening browser...
 echo =========================================================
 echo.

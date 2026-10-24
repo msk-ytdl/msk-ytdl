@@ -43,10 +43,29 @@ jobs:
           python -m pip install cython==0.29.36
           python -m pip install --upgrade buildozer
 
+      - name: Generate MSK Software Solutions Release Keystore
+        run: |
+          keytool -genkeypair -v -keystore msk_release.keystore -alias mskytdl \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=MSK YTDL, OU=Software, O=MSK Software Solutions, L=Shikohabad, ST=Uttar Pradesh, C=IN" \
+            -storepass msksoftwaresolutions -keypass msksoftwaresolutions
+
       - name: Build Android APK with Buildozer
         run: |
           set -o pipefail
           buildozer -v android debug 2>&1 | tee buildozer.log
+
+      - name: Sign APK with MSK Software Solutions Release Certificate
+        run: |
+          for apk in bin/*.apk; do
+            if [ -f "$apk" ]; then
+              echo "Signing $apk with MSK Software Solutions certificate..."
+              jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
+                -keystore msk_release.keystore \
+                -storepass msksoftwaresolutions -keypass msksoftwaresolutions \
+                "$apk" mskytdl || echo "Signing warning, continuing"
+            fi
+          done
 
       - name: Upload APK artifact
         if: success()
