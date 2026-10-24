@@ -1,0 +1,4 @@
+# CI build constraints for python-for-android & buildozer
+# Prevents pip >= 25.0 from breaking internal exception imports (BuildDependencyInstallError)
+pip<25.0
+setuptools<70.0.0

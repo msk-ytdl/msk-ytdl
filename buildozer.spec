@@ -23,7 +23,7 @@ version = 1.0.0
 
 # (list) Application requirements
 # comma separated e.g. requirements = sqlite3,kivy
-requirements = python3,kivy,yt-dlp,yt-dlp-ejs,rich,mutagen,requests,urllib3,certifi,idna,charset-normalizer
+requirements = python3,kivy,openssl,sqlite3,requests,urllib3,certifi,idna,charset-normalizer,yt-dlp,yt-dlp-ejs,rich,mutagen
 
 # (str) Supported orientation (one of landscape, sensorLandscape, portrait or all)
 orientation = portrait
@@ -47,7 +47,10 @@ android.skip_update = False
 android.accept_sdk_license = True
 
 # (str) The Android arch to build for, choices: armeabi-v7a, arm64-v8a, x86, x86_64
-android.archs = arm64-v8a, armeabi-v7a
+android.archs = arm64-v8a
+
+# (str) python-for-android branch to use (develop branch contains PR #3360 pip venv corruption fix)
+p4a.branch = develop
 
 # (bool) enables Android auto backup feature (Android API >=23)
 android.allow_backup = True
