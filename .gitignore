@@ -57,3 +57,7 @@ Desktop.ini
 # Android build artifacts
 .buildozer/
 bin/
+
+# Separate website repository folder
+msk-ytdl-site/
+
