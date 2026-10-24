@@ -37,7 +37,7 @@ android.strip = 2
 orientation = portrait
 
 # (list) Permissions (safe standard permissions; MANAGE_EXTERNAL_STORAGE excluded to prevent Play Protect harmful warning)
-android.permissions = INTERNET,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE,ACCESS_NETWORK_STATE,READ_MEDIA_VIDEO,READ_MEDIA_AUDIO
+android.permissions = INTERNET,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE,ACCESS_NETWORK_STATE,READ_MEDIA_VIDEO,READ_MEDIA_AUDIO,POST_NOTIFICATIONS
 
 # (str) XML file to include as an intent filters in <activity> tag (enables "Share from YouTube")
 android.manifest.intent_filters = intent_filters.xml
