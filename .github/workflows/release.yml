@@ -1,0 +1,224 @@
+name: Build & Release MSK YTDL
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install system dependencies & Android tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git zip unzip openjdk-17-jdk autoconf libtool pkg-config zlib1g-dev \
+            libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev build-essential \
+            libsqlite3-dev python3-virtualenv automake autopoint gettext ffmpeg zipalign apksigner
+
+      - name: Enforce pip constraints for all environments
+        run: |
+          echo "PIP_CONSTRAINT=$GITHUB_WORKSPACE/ci-constraints.txt" >> $GITHUB_ENV
+
+      - name: Install Buildozer, Cython, and build dependencies
+        run: |
+          python -m pip install --upgrade "pip<25.0" "setuptools<70.0.0" wheel
+          python -m pip install cython==0.29.36
+          python -m pip install --upgrade buildozer
+
+      - name: Build Android APK with Buildozer
+        run: |
+          set -o pipefail
+          buildozer -v android debug 2>&1 | tee buildozer.log
+
+      - name: Align and Sign APK with MSK Software Solutions Release Keystore
+        run: |
+          set -e
+          echo "Locating built APK in bin/..."
+          RAW_APK=$(ls bin/*.apk | head -n 1)
+          if [ -z "$RAW_APK" ] || [ ! -f "$RAW_APK" ]; then
+            echo "Error: No APK found in bin/"
+            exit 1
+          fi
+          echo "Found raw APK: $RAW_APK"
+
+          # 1. Strip debug META-INF signatures to prevent conflicting signature schemes
+          zip -d "$RAW_APK" "META-INF/*" || true
+
+          # 2. 4-byte Zipalign for optimal Android OS memory mapping
+          zipalign -v -p 4 "$RAW_APK" bin/MSK-YTDL-aligned.apk
+
+          # 3. Sign using official Android apksigner with v1, v2, and v3 signature schemes
+          apksigner sign --ks msk_release.keystore \
+            --ks-key-alias mskytdl \
+            --ks-pass pass:msksoftwaresolutions \
+            --key-pass pass:msksoftwaresolutions \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            bin/MSK-YTDL-aligned.apk
+
+          # 4. Strictly verify signatures before publication
+          echo "Verifying signed APK..."
+          apksigner verify --verbose bin/MSK-YTDL-aligned.apk
+
+          # 5. Move to canonical MSK-YTDL.apk
+          mv bin/MSK-YTDL-aligned.apk bin/MSK-YTDL.apk
+          ls -la bin/MSK-YTDL.apk
+
+      - name: Upload Android APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MSK-YTDL-Android-APK
+          path: bin/MSK-YTDL.apk
+          retention-days: 14
+
+      - name: Upload full build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: buildozer-full-log
+          path: buildozer.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  build-windows:
+    name: Build Windows Executable
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build Standalone Executable & Shareable ZIP
+        run: |
+          python build_exe.py --onefile
+
+      - name: Sign Standalone Windows Executable with Authenticode
+        shell: pwsh
+        run: |
+          if (Test-Path dist/MSK-YTDL.exe) {
+            .\scripts\sign_windows_exe.ps1 -ExePath dist/MSK-YTDL.exe
+          }
+
+      - name: Upload Windows Standalone EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MSK-YTDL-Windows-EXE
+          path: dist/MSK-YTDL.exe
+          retention-days: 14
+
+      - name: Upload Windows Portable ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MSK-YTDL-Windows-ZIP
+          path: dist/MSK-YTDL-Windows-x64.zip
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: [ build-android, build-windows ]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Android APK
+        uses: actions/download-artifact@v4
+        with:
+          name: MSK-YTDL-Android-APK
+          path: release-assets
+
+      - name: Download Windows EXE
+        uses: actions/download-artifact@v4
+        with:
+          name: MSK-YTDL-Windows-EXE
+          path: release-assets
+
+      - name: Download Windows ZIP
+        uses: actions/download-artifact@v4
+        with:
+          name: MSK-YTDL-Windows-ZIP
+          path: release-assets
+
+      - name: Determine Version Tag & Release Details
+        id: release_meta
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG_NAME="${{ github.ref_name }}"
+          else
+            BASE_VER=$(grep -E '^version\s*=\s*' pyproject.toml | head -n 1 | sed -E 's/version\s*=\s*"(.*)"/\1/')
+            if [ -z "$BASE_VER" ]; then
+              BASE_VER="1.0.0"
+            fi
+            TAG_NAME="v${BASE_VER}.${{ github.run_number }}"
+          fi
+
+          echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "name=MSK YTDL $TAG_NAME" >> $GITHUB_OUTPUT
+          echo "Determined release tag: $TAG_NAME"
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          name: ${{ steps.release_meta.outputs.name }}
+          make_latest: true
+          draft: false
+          prerelease: false
+          files: |
+            release-assets/MSK-YTDL.apk
+            release-assets/MSK-YTDL.exe
+            release-assets/MSK-YTDL-Windows-x64.zip
+          body: |
+            ## 🚀 MSK YTDL ${{ steps.release_meta.outputs.tag }} Released!
+            Official production release by **MSK Software Solutions**.
+
+            ### 📦 Download Assets:
+            - 📱 **Android APK**: [`MSK-YTDL.apk`](https://github.com/${{ github.repository }}/releases/download/${{ steps.release_meta.outputs.tag }}/MSK-YTDL.apk)
+              - Officially signed with **MSK Software Solutions Release Certificate** (APK Signature Schemes v1, v2, and v3 enabled).
+              - Memory-aligned (4-byte zipalign) for seamless installation on Android 5.0+ to Android 15+.
+              - *Note for upgrading users:* If you previously installed an older or test build, please uninstall it first before installing this official release.
+            - 💻 **Windows Standalone**: [`MSK-YTDL.exe`](https://github.com/${{ github.repository }}/releases/download/${{ steps.release_meta.outputs.tag }}/MSK-YTDL.exe)
+              - Digitally signed with Authenticode SHA256.
+            - 🗜️ **Windows Complete Portable Package**: [`MSK-YTDL-Windows-x64.zip`](https://github.com/${{ github.repository }}/releases/download/${{ steps.release_meta.outputs.tag }}/MSK-YTDL-Windows-x64.zip)
+              - Includes bundled FFmpeg & FFprobe, 1-click batch launcher, and Certificate helper.
+
+            ### ✨ Highlights:
+            - **1-Tap YouTube Share**: Share directly from the YouTube app to MSK YTDL on Android.
+            - **HD Video & Audio**: Up to 1080p Full HD video and 320kbps MP3 audio with album artwork.
+            - **Smart Archive**: Never re-download existing videos in playlists.
+            - **100% Free & Ad-Free**: Clean, open-source software by MSK Software Solutions.

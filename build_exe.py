@@ -218,17 +218,18 @@ def package_distribution(onefile: bool = False) -> Optional[Path]:
         shutil.copy2(ffprobe_exe, PORTABLE_DIR / "ffprobe.exe")
 
     # Run Authenticode Code Signing for MSK Software Solutions
-    exe_to_sign = PORTABLE_DIR / "MSK-YTDL.exe"
     sign_script = PROJECT_ROOT / "scripts" / "sign_windows_exe.ps1"
-    if exe_to_sign.exists() and sign_script.exists():
+    if sign_script.exists():
         console.print("[cyan]Applying MSK Software Solutions digital signature...[/cyan]")
-        try:
-            subprocess.run(
-                ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(sign_script), "-ExePath", str(exe_to_sign)],
-                check=False,
-            )
-        except Exception as e:
-            console.print(f"[yellow]Signing warning: {e}[/yellow]")
+        for exe_target in [PORTABLE_DIR / "MSK-YTDL.exe", DIST_DIR / "MSK-YTDL.exe"]:
+            if exe_target.exists():
+                try:
+                    subprocess.run(
+                        ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(sign_script), "-ExePath", str(exe_target)],
+                        check=False,
+                    )
+                except Exception as e:
+                    console.print(f"[yellow]Signing warning for {exe_target.name}: {e}[/yellow]")
 
     # Create batch launcher and README
     create_portable_launcher(PORTABLE_DIR)
