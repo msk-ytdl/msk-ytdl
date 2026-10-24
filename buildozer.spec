@@ -13,7 +13,7 @@ package.domain = org.mskinstitute
 source.dir = .
 
 # (list) Source files to include (let empty to include all the files)
-source.include_exts = py,png,jpg,kv,atlas,json,txt
+source.include_exts = py,png,jpg,kv,atlas,json,txt,xml
 
 # (list) List of inclusions using pattern matching
 #source.include_patterns = assets/*,images/*.png
@@ -23,13 +23,19 @@ version = 1.0.0
 
 # (list) Application requirements
 # comma separated e.g. requirements = sqlite3,kivy
-requirements = python3,kivy,openssl,sqlite3,requests,urllib3,certifi,idna,charset-normalizer,yt-dlp,yt-dlp-ejs,rich,mutagen
+requirements = python3,kivy,openssl,sqlite3,requests,urllib3,certifi,idna,charset-normalizer,yt-dlp,yt-dlp-ejs,rich,mutagen,pyjnius
 
 # (str) Supported orientation (one of landscape, sensorLandscape, portrait or all)
 orientation = portrait
 
 # (list) Permissions
-android.permissions = INTERNET,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE,ACCESS_NETWORK_STATE
+android.permissions = INTERNET,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE,ACCESS_NETWORK_STATE,MANAGE_EXTERNAL_STORAGE,READ_MEDIA_VIDEO,READ_MEDIA_AUDIO
+
+# (str) XML file to include as an intent filters in <activity> tag (enables "Share from YouTube")
+android.manifest.intent_filters = intent_filters.xml
+
+# (str) launchMode to set for the main activity
+android.manifest.launch_mode = singleTask
 
 # (int) Target Android API, should be as high as possible.
 android.api = 34

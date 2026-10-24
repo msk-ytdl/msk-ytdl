@@ -236,3 +236,28 @@ class TestPlaylistAndBatchValidation:
             read_urls_from_file(str(empty_file))
         assert "No valid URLs found" in str(exc_info.value)
 
+
+class TestMobileHelpers:
+    """Tests for mobile YouTube URL extraction from shared text and clipboard."""
+
+    def test_extract_pure_youtube_urls(self):
+        from mobile_app import extract_youtube_url
+        assert extract_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ") == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        assert extract_youtube_url("https://youtu.be/9bZkp7q19f0") == "https://youtu.be/9bZkp7q19f0"
+        assert extract_youtube_url("https://www.youtube.com/shorts/L_LUpnjgPso") == "https://www.youtube.com/shorts/L_LUpnjgPso"
+
+    def test_extract_url_from_youtube_share_text(self):
+        from mobile_app import extract_youtube_url
+        share_text = "Check out this song on YouTube: https://youtu.be/dQw4w9WgXcQ it is amazing!"
+        assert extract_youtube_url(share_text) == "https://youtu.be/dQw4w9WgXcQ"
+
+        shorts_share = "Awesome short https://www.youtube.com/shorts/L_LUpnjgPso watch now"
+        assert extract_youtube_url(shorts_share) == "https://www.youtube.com/shorts/L_LUpnjgPso"
+
+    def test_extract_url_empty_or_invalid(self):
+        from mobile_app import extract_youtube_url
+        assert extract_youtube_url("") is None
+        assert extract_youtube_url(None) is None
+        assert extract_youtube_url("Hello world without link") is None
+
+
