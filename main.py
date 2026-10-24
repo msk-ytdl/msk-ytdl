@@ -1,5 +1,6 @@
 """
-MSK Video Downloader - Android Application Entrypoint.
+MSK YTDL - Android Application Entrypoint.
+Publisher: MSK Software Solutions
 Delegates execution to mobile_app.main() when packaged as an Android APK via Buildozer.
 Initializes safe standard stream wrappers to prevent Android logcat buffer crashes.
 """

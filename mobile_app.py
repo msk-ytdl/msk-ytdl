@@ -108,13 +108,19 @@ def normalize_youtube_url(text: str) -> Optional[str]:
         return None
     raw = text.strip()
 
-    # 1. Full YouTube watch, youtu.be, or shorts URL with video ID
+    # 1. Full YouTube watch, youtu.be, shorts, live, or embed URL with video ID
     match_full = re.search(
-        r"https?://(?:www\.|m\.)?(?:youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})|youtu\.be/([a-zA-Z0-9_-]{11})|youtube\.com/shorts/([a-zA-Z0-9_-]{11}))",
+        r"https?://(?:www\.|m\.)?(?:youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})|youtu\.be/([a-zA-Z0-9_-]{11})|youtube\.com/shorts/([a-zA-Z0-9_-]{11})|youtube\.com/live/([a-zA-Z0-9_-]{11})|youtube\.com/embed/([a-zA-Z0-9_-]{11}))",
         raw,
     )
     if match_full:
-        vid = match_full.group(1) or match_full.group(2) or match_full.group(3)
+        vid = (
+            match_full.group(1)
+            or match_full.group(2)
+            or match_full.group(3)
+            or match_full.group(4)
+            or match_full.group(5)
+        )
         return f"https://www.youtube.com/watch?v={vid}"
 
     # 2. Playlist URL
@@ -177,11 +183,30 @@ def request_android_permissions():
         print(f"[Android] Permission request notice: {e}")
 
 
+def is_running_on_android() -> bool:
+    """Detect if running inside an Android runtime environment."""
+    return (
+        "ANDROID_ARGUMENT" in os.environ
+        or "ANDROID_ROOT" in os.environ
+        or "ANDROID_BOOTLOGO" in os.environ
+        or Path("/system/build.prop").exists()
+    )
+
+
 def get_android_download_dir() -> Path:
     """
     Resolve a guaranteed writable destination directory on Android.
     Prefers public Downloads folder; falls back to app-specific external storage.
+    If running on desktop during testing/development, uses user's Downloads/YouTube directory.
     """
+    if not is_running_on_android():
+        desktop_dir = Path.home() / "Downloads" / "YouTube"
+        try:
+            desktop_dir.mkdir(parents=True, exist_ok=True)
+            return desktop_dir
+        except Exception:
+            return Path.home() / "Downloads"
+
     candidates = [
         Path("/storage/emulated/0/Download/YouTube"),
         Path("/sdcard/Download/YouTube"),
@@ -627,7 +652,7 @@ if KIVY_AVAILABLE:
                         # audio and video in a single stream without requiring FFmpeg muxing.
                         "extractor_args": {
                             "youtube": {
-                                "player_client": ["android", "web", "mweb"]
+                                "player_client": ["android", "ios", "web", "mweb"]
                             }
                         },
                     }

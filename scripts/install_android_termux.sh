@@ -46,13 +46,20 @@ else
     python -m pip install -e .
 fi
 
-# 6. Create global command launcher 'msk-ytdl'
+# 6. Create global command launchers 'msk-ytdl' and 'msk-ytdl-web'
 LAUNCHER_PATH="$PREFIX/bin/msk-ytdl"
 cat << 'EOF' > "$LAUNCHER_PATH"
 #!/data/data/com.termux/files/usr/bin/bash
 python -m youtube_downloader "$@"
 EOF
 chmod +x "$LAUNCHER_PATH"
+
+WEB_LAUNCHER_PATH="$PREFIX/bin/msk-ytdl-web"
+cat << 'EOF' > "$WEB_LAUNCHER_PATH"
+#!/data/data/com.termux/files/usr/bin/bash
+python -m youtube_downloader --web "$@"
+EOF
+chmod +x "$WEB_LAUNCHER_PATH"
 
 # Setup initial configuration with Android Download path
 CONFIG_DIR="$HOME/.msk_ytdl"
@@ -79,11 +86,14 @@ fi
 
 echo ""
 echo "=========================================================="
-echo "  INSTALLATION SUCCESSFUL!"
+echo "  INSTALLATION SUCCESSFUL! (MSK Software Solutions)"
 echo "=========================================================="
 echo ""
-echo "To run MSK-YTDL anytime on your phone, just open Termux and type:"
+echo "To run MSK YTDL anytime on your phone, just open Termux and type:"
 echo "    msk-ytdl"
+echo ""
+echo "To launch the responsive touch Web UI in your phone browser:"
+echo "    msk-ytdl-web"
 echo ""
 echo "Or download a video directly:"
 echo "    msk-ytdl --url \"https://youtu.be/...\" --mode video"

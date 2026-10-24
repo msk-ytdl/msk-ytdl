@@ -266,6 +266,8 @@ class TestMobileHelpers:
         assert normalize_youtube_url("watch?v=UQyh7QIVaDU") == "https://www.youtube.com/watch?v=UQyh7QIVaDU"
         assert normalize_youtube_url("UQyh7QIVaDU") == "https://www.youtube.com/watch?v=UQyh7QIVaDU"
         assert normalize_youtube_url("https://youtu.be/UQyh7QIVaDU?si=5E9QdyxfYqh7rysR") == "https://www.youtube.com/watch?v=UQyh7QIVaDU"
+        assert normalize_youtube_url("https://www.youtube.com/live/UQyh7QIVaDU?feature=share") == "https://www.youtube.com/watch?v=UQyh7QIVaDU"
+        assert normalize_youtube_url("https://www.youtube.com/embed/UQyh7QIVaDU") == "https://www.youtube.com/watch?v=UQyh7QIVaDU"
 
     def test_mobile_player_clients_and_format_fallback(self):
         """Verify that progressive streams (format 18 / 140) are included in all mobile download format options."""

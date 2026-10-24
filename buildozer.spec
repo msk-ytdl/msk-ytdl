@@ -15,6 +15,9 @@ source.dir = .
 # (list) Source files to include (let empty to include all the files)
 source.include_exts = py,png,jpg,kv,atlas,json,txt,xml
 
+# (list) List of directories to exclude from the APK
+source.exclude_dirs = tests, bin, .venv, venv, .git, .github, build, dist, msk-ytdl-site, .pytest_cache, __pycache__
+
 # (list) List of inclusions using pattern matching
 #source.include_patterns = assets/*,images/*.png
 

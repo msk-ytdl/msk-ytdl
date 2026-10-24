@@ -38,7 +38,7 @@ if (-not (Test-Path $ExePath)) {
 
 # 2. Check for or generate 'MSK Software Solutions' Code Signing Certificate
 $certSubject = "CN=MSK Software Solutions, O=MSK Software Solutions, C=IN"
-$existingCert = Get-ChildItem -Path "Cert:\CurrentUser\My" -CodeSigningCert | Where-Object { $_.Subject -match "MSK Software Solutions" } | Select-Object -First 1
+$existingCert = Get-ChildItem -Path "Cert:\CurrentUser\My" | Where-Object { $_.Subject -match "MSK Software Solutions" } | Select-Object -First 1
 
 if (-not $existingCert) {
     Write-Host "Creating new Code Signing Certificate for 'MSK Software Solutions'..." -ForegroundColor Cyan

@@ -962,6 +962,26 @@
       }
     }
 
+    // Fetch system status on load to verify FFmpeg and download dir
+    async function loadSystemStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        const badge = document.getElementById('systemStatusBadge');
+        if (badge && data) {
+          if (data.ffmpeg_ready) {
+            badge.innerHTML = '<div class="status-dot"></div><span>System Ready</span>';
+            badge.title = `FFmpeg Ready • Target: ${data.download_directory || 'Downloads'}`;
+          } else {
+            badge.innerHTML = '<div class="status-dot" style="background:#ff5252;"></div><span style="color:#ff5252;">FFmpeg Missing</span>';
+            badge.title = 'External FFmpeg not detected; progressive fallback mode active.';
+          }
+        }
+      } catch (e) {}
+    }
+
+    loadSystemStatus();
+
     // Start background poller on page load
     setInterval(pollJobs, 1500);
     pollJobs();
