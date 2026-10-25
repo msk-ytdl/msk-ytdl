@@ -67,10 +67,12 @@ try:
     from kivy.core.window import Window
     from kivy.graphics import Color, RoundedRectangle
     from kivy.metrics import dp
+    from kivy.uix.behaviors import ButtonBehavior
     from kivy.uix.boxlayout import BoxLayout
     from kivy.uix.button import Button
     from kivy.uix.image import AsyncImage, Image
     from kivy.uix.label import Label
+    from kivy.uix.modalview import ModalView
     from kivy.uix.progressbar import ProgressBar
     from kivy.uix.scrollview import ScrollView
     from kivy.uix.spinner import Spinner
@@ -212,6 +214,25 @@ def format_duration(seconds: Optional[float]) -> str:
     if hours > 0:
         return f"{hours}:{minutes:02d}:{rem_secs:02d}"
     return f"{minutes}:{rem_secs:02d}"
+
+
+def get_asset_icon(icon_name: str) -> str:
+    """Safely locate icon PNG in assets/icons, assets, or workspace directories."""
+    if not icon_name:
+        return ""
+    clean_name = os.path.basename(icon_name)
+    candidates = [
+        Path(__file__).resolve().parent / "assets" / "icons" / clean_name,
+        Path("assets/icons") / clean_name,
+        Path(__file__).resolve().parent / "assets" / clean_name,
+        Path("assets") / clean_name,
+        Path(__file__).resolve().parent / clean_name,
+        Path(clean_name),
+    ]
+    for c in candidates:
+        if c.exists():
+            return str(c)
+    return str(candidates[0])
 
 
 def get_app_version() -> str:
@@ -606,6 +627,208 @@ if KIVY_AVAILABLE:
             self.rect.size = self.size
 
 
+    class IconActionButton(ButtonBehavior, BoxLayout):
+        """Action button combining a crisp PNG icon and readable text label."""
+        def __init__(
+            self,
+            icon_path: str = "",
+            text: str = "",
+            bg_color=(0.18, 0.22, 0.32, 1.0),
+            text_color=(1.0, 1.0, 1.0, 1.0),
+            font_size="11sp",
+            icon_size=(dp(16), dp(16)),
+            radius=8,
+            **kwargs,
+        ):
+            super().__init__(**kwargs)
+            self.orientation = "horizontal"
+            self.spacing = dp(5)
+            self.padding = [dp(8), dp(4)]
+            self.bg_color = list(bg_color)
+            self.radius = radius
+
+            with self.canvas.before:
+                self._col_instr = Color(*self.bg_color)
+                self._rect_instr = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(self.radius)])
+            self.bind(pos=self._update_geom, size=self._update_geom)
+
+            resolved_icon = get_asset_icon(icon_path)
+            if resolved_icon and os.path.exists(resolved_icon):
+                self.icon_img = Image(
+                    source=resolved_icon,
+                    size_hint=(None, None),
+                    size=icon_size,
+                    allow_stretch=True,
+                    keep_ratio=True,
+                )
+                self.add_widget(self.icon_img)
+
+            if text:
+                self.label = Label(
+                    text=text,
+                    font_size=font_size,
+                    bold=True,
+                    color=text_color,
+                    halign="center",
+                    valign="middle",
+                )
+                self.label.bind(size=self.label.setter("text_size"))
+                self.add_widget(self.label)
+
+        def _update_geom(self, *args):
+            self._rect_instr.pos = self.pos
+            self._rect_instr.size = self.size
+
+        def set_bg_color(self, rgba):
+            self._col_instr.rgba = rgba
+
+
+    class NavTabItem(ButtonBehavior, BoxLayout):
+        """Bottom navigation tab item with crisp icon and bold title."""
+        def __init__(self, tab_name: str, icon_name: str, label_text: str, is_active=False, **kwargs):
+            super().__init__(**kwargs)
+            self.orientation = "vertical"
+            self.tab_name = tab_name
+            self.spacing = dp(2)
+            self.padding = [dp(4), dp(4)]
+            self.is_active = is_active
+
+            with self.canvas.before:
+                self._bg_col = Color(0.18, 0.22, 0.32, 1.0 if is_active else 0.0)
+                self._rect = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(8)])
+            self.bind(pos=self._update_geom, size=self._update_geom)
+
+            icon_path = get_asset_icon(icon_name)
+            self.icon_img = Image(
+                source=icon_path,
+                size_hint=(None, None),
+                size=(dp(22), dp(22)),
+                allow_stretch=True,
+                keep_ratio=True,
+                pos_hint={"center_x": 0.5},
+            )
+            self.add_widget(self.icon_img)
+
+            active_col = (1.0, 0.72, 0.0, 1.0)
+            inactive_col = (0.65, 0.70, 0.80, 1.0)
+            self.label = Label(
+                text=label_text,
+                font_size="10.5sp",
+                bold=True,
+                color=active_col if is_active else inactive_col,
+                size_hint_y=None,
+                height=dp(14),
+                halign="center",
+                valign="middle",
+            )
+            self.label.bind(size=self.label.setter("text_size"))
+            self.add_widget(self.label)
+
+        def _update_geom(self, *args):
+            self._rect.pos = self.pos
+            self._rect.size = self.size
+
+        def set_active(self, active: bool):
+            self.is_active = active
+            self._bg_col.rgba = (0.18, 0.22, 0.32, 1.0) if active else (0.09, 0.11, 0.16, 1.0)
+            self.label.color = (1.0, 0.72, 0.0, 1.0) if active else (0.65, 0.70, 0.80, 1.0)
+
+        @property
+        def text(self):
+            return self.label.text
+
+        @text.setter
+        def text(self, val):
+            self.label.text = val
+
+
+    class DownloadActionButton(ButtonBehavior, BoxLayout):
+        """Full-width primary download button with animated arrow icon."""
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.orientation = "horizontal"
+            self.spacing = dp(8)
+            self.padding = [dp(16), dp(10)]
+            self.size_hint_y = None
+            self.height = dp(52)
+
+            with self.canvas.before:
+                self._col_instr = Color(1.0, 0.65, 0.0, 1.0)
+                self._rect_instr = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(10)])
+            self.bind(pos=self._update_geom, size=self._update_geom)
+
+            icon_path = get_asset_icon("download_arrow.png")
+            self.icon_img = Image(
+                source=icon_path,
+                size_hint=(None, None),
+                size=(dp(24), dp(24)),
+                allow_stretch=True,
+                keep_ratio=True,
+            )
+            self.add_widget(self.icon_img)
+
+            self.label = Label(
+                text="DOWNLOAD NOW",
+                font_size="15sp",
+                bold=True,
+                color=(0.04, 0.05, 0.08, 1.0),
+                halign="center",
+                valign="middle",
+            )
+            self.label.bind(size=self.label.setter("text_size"))
+            self.add_widget(self.label)
+
+        def _update_geom(self, *args):
+            self._rect_instr.pos = self.pos
+            self._rect_instr.size = self.size
+
+        @property
+        def text(self):
+            return self.label.text
+
+        @text.setter
+        def text(self, val):
+            self.label.text = val
+
+        @property
+        def disabled(self):
+            return super().disabled
+
+        @disabled.setter
+        def disabled(self, val):
+            super(DownloadActionButton, type(self)).disabled.__set__(self, val)
+            if val:
+                self._col_instr.rgba = (0.35, 0.35, 0.40, 1.0)
+            else:
+                self._col_instr.rgba = (1.0, 0.65, 0.0, 1.0)
+
+
+    class SettingsIconButton(ButtonBehavior, BoxLayout):
+        """Header circular button with settings gear icon."""
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.size_hint = (None, None)
+            self.size = (dp(40), dp(40))
+            self.padding = [dp(8), dp(8)]
+            with self.canvas.before:
+                self._col_instr = Color(0.16, 0.19, 0.28, 1.0)
+                self.rect = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(20)])
+            self.bind(pos=self._update_geom, size=self._update_geom)
+            icon_path = get_asset_icon("settings.png")
+            self.icon_img = Image(
+                source=icon_path,
+                size_hint=(None, None),
+                size=(dp(24), dp(24)),
+                allow_stretch=True,
+                keep_ratio=True,
+            )
+            self.add_widget(self.icon_img)
+
+        def _update_geom(self, *args):
+            self.rect.pos = self.pos
+            self.rect.size = self.size
+
+
     class MSKDownloaderMobile(App):
         def build(self):
             self.title = "MSK YTDL"
@@ -680,7 +903,7 @@ if KIVY_AVAILABLE:
             return root
 
         # -----------------------------------------------------------------
-        # Header Card Builder
+        # Header Card Builder & Settings Modal
         # -----------------------------------------------------------------
         def create_header_card(self) -> BoxLayout:
             header_card = StyledCard(
@@ -713,7 +936,7 @@ if KIVY_AVAILABLE:
                 )
                 header_card.add_widget(app_logo)
 
-            header_text_box = BoxLayout(orientation="vertical", spacing=dp(1))
+            header_text_box = BoxLayout(orientation="vertical", spacing=dp(1), size_hint_x=1.0)
             app_version = get_app_version()
             brand_label = Label(
                 text=f"[b][color=#FFB300]MSK[/color] YTDL[/b]  [size=12sp][color=#00E676]v{app_version}[/color][/size]",
@@ -740,48 +963,187 @@ if KIVY_AVAILABLE:
             header_text_box.add_widget(brand_label)
             header_text_box.add_widget(tagline)
             header_card.add_widget(header_text_box)
+
+            # Settings Icon Button (Gear Icon)
+            self.settings_btn = SettingsIconButton()
+            self.settings_btn.bind(on_press=lambda ins: self.open_settings_modal())
+            header_card.add_widget(self.settings_btn)
+
             return header_card
 
+        def open_settings_modal(self):
+            """Open in-app Settings modal for quality preference, clipboard toggle, storage info, and app details."""
+            modal = ModalView(size_hint=(0.92, 0.78), auto_dismiss=True)
+
+            content = StyledCard(
+                orientation="vertical",
+                padding=[dp(16), dp(16)],
+                spacing=dp(12),
+                bg_color=(0.08, 0.10, 0.16, 1.0),
+                radius=16,
+            )
+
+            # Header Row
+            header_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(32))
+            settings_icon_path = get_asset_icon("settings.png")
+            if settings_icon_path:
+                header_row.add_widget(
+                    Image(source=settings_icon_path, size_hint=(None, None), size=(dp(26), dp(26)), allow_stretch=True, keep_ratio=True)
+                )
+            modal_title = Label(
+                text="[b]App Settings & Preferences[/b]",
+                markup=True,
+                font_size="16sp",
+                color=(1.0, 0.75, 0.0, 1.0),
+                halign="left",
+                valign="middle",
+            )
+            modal_title.bind(size=modal_title.setter("text_size"))
+            header_row.add_widget(modal_title)
+            content.add_widget(header_row)
+
+            # Scrollable body in case of small phone screens
+            scroll_body = ScrollView(do_scroll_x=False, do_scroll_y=True)
+            body_layout = BoxLayout(orientation="vertical", spacing=dp(12), size_hint_y=None)
+            body_layout.bind(minimum_height=body_layout.setter("height"))
+
+            # Section 1: Default Video & Audio Quality
+            q_card = StyledCard(orientation="vertical", padding=[dp(12), dp(10)], spacing=dp(6), size_hint_y=None, height=dp(88), bg_color=(0.11, 0.13, 0.20, 1.0))
+            q_lbl = Label(
+                text="[b]Default Download Quality[/b]\n[size=10.5sp][color=#90CAF9]Choose default resolution for new downloads[/color][/size]",
+                markup=True,
+                font_size="12sp",
+                halign="left",
+                size_hint_y=None,
+                height=dp(30),
+            )
+            q_lbl.bind(size=q_lbl.setter("text_size"))
+            q_card.add_widget(q_lbl)
+
+            q_spinner = Spinner(
+                text=self.quality_spinner.text,
+                values=self.quality_spinner.values,
+                size_hint_y=None,
+                height=dp(38),
+                background_color=(0.16, 0.20, 0.30, 1.0),
+                color=(1, 1, 1, 1),
+                font_size="12sp",
+            )
+            def on_pref_quality_changed(spinner, text):
+                self.quality_spinner.text = text
+            q_spinner.bind(text=on_pref_quality_changed)
+            q_card.add_widget(q_spinner)
+            body_layout.add_widget(q_card)
+
+            # Section 2: Smart Clipboard Detection Toggle
+            clip_card = StyledCard(orientation="vertical", padding=[dp(12), dp(10)], spacing=dp(6), size_hint_y=None, height=dp(78), bg_color=(0.11, 0.13, 0.20, 1.0))
+            clip_lbl = Label(
+                text="[b]Smart Clipboard Auto-Detect[/b]\n[size=10.5sp][color=#90CAF9]Notify when YouTube links are copied outside the app[/color][/size]",
+                markup=True,
+                font_size="12sp",
+                halign="left",
+                size_hint_y=None,
+                height=dp(30),
+            )
+            clip_lbl.bind(size=clip_lbl.setter("text_size"))
+            clip_card.add_widget(clip_lbl)
+
+            is_clip_on = getattr(self, "clipboard_detection_enabled", True)
+            clip_btn = Button(
+                text="Auto-Detect: ENABLED" if is_clip_on else "Auto-Detect: DISABLED",
+                font_size="11.5sp",
+                bold=True,
+                size_hint_y=None,
+                height=dp(32),
+                background_color=(0.10, 0.45, 0.22, 1.0) if is_clip_on else (0.35, 0.15, 0.15, 1.0),
+                color=(1, 1, 1, 1),
+            )
+            def toggle_clip(ins):
+                current = getattr(self, "clipboard_detection_enabled", True)
+                new_state = not current
+                self.clipboard_detection_enabled = new_state
+                if new_state:
+                    ins.text = "Auto-Detect: ENABLED"
+                    ins.background_color = (0.10, 0.45, 0.22, 1.0)
+                else:
+                    ins.text = "Auto-Detect: DISABLED"
+                    ins.background_color = (0.35, 0.15, 0.15, 1.0)
+                    self.clipboard_banner.height = 0
+                    self.clipboard_banner.opacity = 0
+            clip_btn.bind(on_press=toggle_clip)
+            clip_card.add_widget(clip_btn)
+            body_layout.add_widget(clip_card)
+
+            # Section 3: Storage Location
+            store_card = StyledCard(orientation="vertical", padding=[dp(12), dp(10)], spacing=dp(4), size_hint_y=None, height=dp(66), bg_color=(0.11, 0.13, 0.20, 1.0))
+            store_lbl = Label(
+                text=f"[b]Download Destination[/b]\n[size=10.5sp][color=#B0BEC5]{get_android_download_dir()}[/color][/size]",
+                markup=True,
+                font_size="12sp",
+                halign="left",
+                size_hint_y=None,
+                height=dp(46),
+            )
+            store_lbl.bind(size=store_lbl.setter("text_size"))
+            store_card.add_widget(store_lbl)
+            body_layout.add_widget(store_card)
+
+            # Section 4: About App
+            app_ver = get_app_version()
+            about_card = StyledCard(orientation="vertical", padding=[dp(12), dp(10)], spacing=dp(3), size_hint_y=None, height=dp(72), bg_color=(0.11, 0.13, 0.20, 1.0))
+            about_lbl = Label(
+                text=f"[b]MSK YTDL v{app_ver}[/b]\n[size=10.5sp][color=#78909C]Developed by MSK Software Solutions\nWebsite: mskinstitute.in[/color][/size]",
+                markup=True,
+                font_size="12sp",
+                halign="left",
+                size_hint_y=None,
+                height=dp(52),
+            )
+            about_lbl.bind(size=about_lbl.setter("text_size"))
+            about_card.add_widget(about_lbl)
+            body_layout.add_widget(about_card)
+
+            scroll_body.add_widget(body_layout)
+            content.add_widget(scroll_body)
+
+            # Close Button
+            close_btn = Button(
+                text="SAVE & CLOSE",
+                font_size="13sp",
+                bold=True,
+                size_hint_y=None,
+                height=dp(42),
+                background_color=(1.0, 0.68, 0.0, 1.0),
+                color=(0.04, 0.05, 0.08, 1.0),
+            )
+            close_btn.bind(on_press=modal.dismiss)
+            content.add_widget(close_btn)
+
+            modal.add_widget(content)
+            modal.open()
+
         # -----------------------------------------------------------------
-        # Bottom Navigation Footer Bar Builder
+        # Bottom Navigation Footer Bar Builder (Home / Videos / Downloads)
         # -----------------------------------------------------------------
         def create_bottom_nav(self) -> BoxLayout:
             nav_bar = StyledCard(
                 orientation="horizontal",
-                padding=[dp(6), dp(4)],
+                padding=[dp(6), dp(3)],
                 spacing=dp(6),
                 size_hint_y=None,
-                height=dp(52),
+                height=dp(56),
                 bg_color=(0.07, 0.08, 0.13, 1.0),
             )
 
-            self.nav_btn_home = Button(
-                text="HOME",
-                font_size="12sp",
-                bold=True,
-                background_color=(0.18, 0.22, 0.32, 1.0),
-                color=(1.0, 0.72, 0.0, 1.0),  # Active amber
-            )
+            self.nav_btn_home = NavTabItem("home", "home.png", "HOME", is_active=True)
             self.nav_btn_home.bind(on_press=lambda ins: self.switch_tab("home"))
             nav_bar.add_widget(self.nav_btn_home)
 
-            self.nav_btn_videos = Button(
-                text="VIDEOS",
-                font_size="12sp",
-                bold=True,
-                background_color=(0.09, 0.11, 0.16, 1.0),
-                color=(0.65, 0.70, 0.80, 1.0),
-            )
+            self.nav_btn_videos = NavTabItem("videos", "videos.png", "VIDEOS", is_active=False)
             self.nav_btn_videos.bind(on_press=lambda ins: self.switch_tab("videos"))
             nav_bar.add_widget(self.nav_btn_videos)
 
-            self.nav_btn_downloads = Button(
-                text="DOWNLOADS",
-                font_size="12sp",
-                bold=True,
-                background_color=(0.09, 0.11, 0.16, 1.0),
-                color=(0.65, 0.70, 0.80, 1.0),
-            )
+            self.nav_btn_downloads = NavTabItem("downloads", "downloads.png", "DOWNLOADS", is_active=False)
             self.nav_btn_downloads.bind(on_press=lambda ins: self.switch_tab("downloads"))
             nav_bar.add_widget(self.nav_btn_downloads)
 
@@ -797,32 +1159,16 @@ if KIVY_AVAILABLE:
             self.active_tab = tab_name
             self.main_container.clear_widgets()
 
-            # Colors
-            inactive_bg = (0.09, 0.11, 0.16, 1.0)
-            inactive_col = (0.65, 0.70, 0.80, 1.0)
-            active_bg = (0.18, 0.22, 0.32, 1.0)
-            active_col = (1.0, 0.72, 0.0, 1.0)
-
-            # Reset buttons
-            self.nav_btn_home.background_color = inactive_bg
-            self.nav_btn_home.color = inactive_col
-            self.nav_btn_downloads.background_color = inactive_bg
-            self.nav_btn_downloads.color = inactive_col
-            self.nav_btn_videos.background_color = inactive_bg
-            self.nav_btn_videos.color = inactive_col
+            self.nav_btn_home.set_active(tab_name == "home")
+            self.nav_btn_videos.set_active(tab_name == "videos")
+            self.nav_btn_downloads.set_active(tab_name == "downloads")
 
             if tab_name == "home":
-                self.nav_btn_home.background_color = active_bg
-                self.nav_btn_home.color = active_col
                 self.main_container.add_widget(self.home_view)
             elif tab_name == "downloads":
-                self.nav_btn_downloads.background_color = active_bg
-                self.nav_btn_downloads.color = active_col
                 self.main_container.add_widget(self.downloads_view)
                 Clock.schedule_once(lambda dt: self.refresh_library(), 0.05)
             elif tab_name == "videos":
-                self.nav_btn_videos.background_color = active_bg
-                self.nav_btn_videos.color = active_col
                 self.main_container.add_widget(self.videos_view)
                 Clock.schedule_once(lambda dt: self.populate_recommendations(), 0.05)
 
@@ -888,23 +1234,23 @@ if KIVY_AVAILABLE:
             self.url_input.bind(text=self.on_url_input_changed)
             input_card.add_widget(self.url_input)
 
-            # Action Buttons Row: PASTE & CLEAR
-            btn_row = BoxLayout(orientation="horizontal", spacing=dp(10), size_hint_y=None, height=dp(36))
-            paste_btn = Button(
+            # Action Buttons Row: PASTE & CLEAR with crisp PNG icons
+            btn_row = BoxLayout(orientation="horizontal", spacing=dp(10), size_hint_y=None, height=dp(38))
+            paste_btn = IconActionButton(
+                icon_path="paste.png",
                 text="PASTE LINK",
+                bg_color=(0.20, 0.26, 0.40, 1.0),
+                text_color=(1, 0.75, 0, 1),
                 font_size="12sp",
-                bold=True,
-                background_color=(0.20, 0.26, 0.40, 1.0),
-                color=(1, 0.75, 0, 1),
             )
             paste_btn.bind(on_press=self.on_paste_clicked)
 
-            clear_btn = Button(
+            clear_btn = IconActionButton(
+                icon_path="clear.png",
                 text="CLEAR",
+                bg_color=(0.18, 0.20, 0.28, 1.0),
+                text_color=(0.8, 0.85, 0.95, 1),
                 font_size="12sp",
-                bold=True,
-                background_color=(0.18, 0.20, 0.28, 1.0),
-                color=(0.8, 0.85, 0.95, 1),
             )
             clear_btn.bind(on_press=self.on_clear_clicked)
 
@@ -984,9 +1330,9 @@ if KIVY_AVAILABLE:
             format_card.add_widget(format_title)
 
             self.quality_spinner = Spinner(
-                text="Video (MP4 - Best Available)",
+                text="Video (Max Quality - 1080p / 720p HD)",
                 values=(
-                    "Video (MP4 - Best Available)",
+                    "Video (Max Quality - 1080p / 720p HD)",
                     "Video (720p HD MP4)",
                     "Video (360p Fast MP4)",
                     "Audio Only (HQ MP3 Music + Album Art)",
@@ -1031,16 +1377,8 @@ if KIVY_AVAILABLE:
             status_card.add_widget(self.status_label)
             content.add_widget(status_card)
 
-            # Prominent DOWNLOAD NOW Action Button
-            self.download_btn = Button(
-                text="DOWNLOAD NOW",
-                font_size="16sp",
-                bold=True,
-                background_color=(1.0, 0.65, 0.0, 1.0),  # Vivid Amber Gold
-                color=(0.04, 0.05, 0.08, 1.0),
-                size_hint_y=None,
-                height=dp(52),
-            )
+            # Prominent DOWNLOAD NOW Action Button with animated arrow icon
+            self.download_btn = DownloadActionButton()
             self.download_btn.bind(on_press=self.start_download)
             content.add_widget(self.download_btn)
 
@@ -1096,14 +1434,14 @@ if KIVY_AVAILABLE:
             self.downloads_title_lbl.bind(size=self.downloads_title_lbl.setter("text_size"))
             top_row.add_widget(self.downloads_title_lbl)
 
-            refresh_btn = Button(
+            refresh_btn = IconActionButton(
+                icon_path="shuffle.png",
                 text="REFRESH",
                 font_size="11sp",
-                bold=True,
                 size_hint=(None, None),
-                size=(dp(84), dp(28)),
-                background_color=(0.18, 0.22, 0.32, 1.0),
-                color=(1.0, 0.75, 0.0, 1.0),
+                size=(dp(96), dp(28)),
+                bg_color=(0.18, 0.22, 0.32, 1.0),
+                text_color=(1.0, 0.75, 0.0, 1.0),
             )
             refresh_btn.bind(on_press=lambda ins: self.refresh_library())
             top_row.add_widget(refresh_btn)
@@ -1245,32 +1583,32 @@ if KIVY_AVAILABLE:
             self.video_search_input.bind(on_text_validate=lambda ins: self.on_search_clicked())
             search_card.add_widget(self.video_search_input)
 
-            # Search Action Buttons: [SEARCH] [CLEAR] [SHUFFLE]
-            btn_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(30))
-            self.search_btn = Button(
+            # Search Action Buttons: [SEARCH] [CLEAR] [SHUFFLE] with icons
+            btn_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(34))
+            self.search_btn = IconActionButton(
+                icon_path="search.png",
                 text="SEARCH",
+                bg_color=(1.0, 0.68, 0.0, 1.0),
+                text_color=(0.04, 0.05, 0.08, 1.0),
                 font_size="11sp",
-                bold=True,
-                background_color=(1.0, 0.68, 0.0, 1.0),
-                color=(0.04, 0.05, 0.08, 1.0),
             )
             self.search_btn.bind(on_press=lambda ins: self.on_search_clicked())
 
-            clear_search_btn = Button(
+            clear_search_btn = IconActionButton(
+                icon_path="clear.png",
                 text="CLEAR",
+                bg_color=(0.18, 0.20, 0.28, 1.0),
+                text_color=(0.80, 0.85, 0.95, 1.0),
                 font_size="11sp",
-                bold=True,
-                background_color=(0.18, 0.20, 0.28, 1.0),
-                color=(0.80, 0.85, 0.95, 1.0),
             )
             clear_search_btn.bind(on_press=lambda ins: self.on_search_clear_clicked())
 
-            shuffle_btn = Button(
+            shuffle_btn = IconActionButton(
+                icon_path="shuffle.png",
                 text="SHUFFLE",
+                bg_color=(0.18, 0.24, 0.38, 1.0),
+                text_color=(0.40, 0.85, 1.0, 1.0),
                 font_size="11sp",
-                bold=True,
-                background_color=(0.18, 0.24, 0.38, 1.0),
-                color=(0.40, 0.85, 1.0, 1.0),
             )
             shuffle_btn.bind(on_press=lambda ins: self.on_shuffle_trending())
 
@@ -1540,15 +1878,15 @@ if KIVY_AVAILABLE:
             info_col.add_widget(meta_lbl)
             card.add_widget(info_col)
 
-            # 1-Tap GET Button
-            dl_btn = Button(
+            # 1-Tap GET Button with download icon
+            dl_btn = IconActionButton(
+                icon_path="download_arrow.png",
                 text="GET",
                 font_size="11sp",
-                bold=True,
                 size_hint=(None, None),
-                size=(dp(54), dp(40)),
-                background_color=(1.0, 0.68, 0.0, 1.0),
-                color=(0.04, 0.05, 0.08, 1.0),
+                size=(dp(68), dp(38)),
+                bg_color=(1.0, 0.68, 0.0, 1.0),
+                text_color=(0.04, 0.05, 0.08, 1.0),
             )
             dl_btn.bind(on_press=lambda ins, u=item["url"]: self.load_recommended_video(u))
             card.add_widget(dl_btn)
@@ -1628,7 +1966,9 @@ if KIVY_AVAILABLE:
         # Clipboard Auto-Detect Logic
         # -----------------------------------------------------------------
         def check_clipboard(self, dt=None):
-            """Poll clipboard safely; if YouTube URL found and not already loaded, show banner."""
+            """Poll clipboard safely if enabled; if YouTube URL found and not already loaded, show banner."""
+            if not getattr(self, "clipboard_detection_enabled", True):
+                return
             try:
                 clip = Clipboard.paste()
                 if clip and clip != self.last_clipboard_text:
@@ -1921,28 +2261,28 @@ if KIVY_AVAILABLE:
                     item_lbl.bind(size=item_lbl.setter("text_size"))
                     row.add_widget(item_lbl)
 
-                    # PLAY BUTTON
-                    play_btn = Button(
+                    # PLAY BUTTON with icon
+                    play_btn = IconActionButton(
+                        icon_path="play.png",
                         text="PLAY",
                         font_size="11sp",
-                        bold=True,
                         size_hint=(None, None),
-                        size=(dp(58), dp(34)),
-                        background_color=(0.08, 0.50, 0.24, 1.0),
-                        color=(1, 1, 1, 1),
+                        size=(dp(72), dp(34)),
+                        bg_color=(0.08, 0.50, 0.24, 1.0),
+                        text_color=(1, 1, 1, 1),
                     )
                     play_btn.bind(on_press=lambda ins, p=media_path: open_media_file(p))
                     row.add_widget(play_btn)
 
-                    # DELETE BUTTON
-                    del_btn = Button(
+                    # DELETE BUTTON with icon
+                    del_btn = IconActionButton(
+                        icon_path="delete.png",
                         text="DEL",
                         font_size="11sp",
-                        bold=True,
                         size_hint=(None, None),
-                        size=(dp(48), dp(34)),
-                        background_color=(0.60, 0.12, 0.12, 1.0),
-                        color=(1, 1, 1, 1),
+                        size=(dp(64), dp(34)),
+                        bg_color=(0.60, 0.12, 0.12, 1.0),
+                        text_color=(1, 1, 1, 1),
                     )
                     del_btn.bind(on_press=lambda ins, p=media_path, r=row: self.on_delete_clicked(p, r))
                     row.add_widget(del_btn)
@@ -2074,29 +2414,35 @@ if KIVY_AVAILABLE:
                     }
 
                     if is_audio:
-                        if has_ffmpeg:
-                            ydl_opts["format"] = "bestaudio/best"
-                            ydl_opts["postprocessors"] = [{
-                                "key": "FFmpegExtractAudio",
-                                "preferredcodec": "mp3",
-                                "preferredquality": "192",
-                            }]
+                        if "MP3" in selected_format:
+                            if has_ffmpeg:
+                                ydl_opts["format"] = "bestaudio/best"
+                                ydl_opts["postprocessors"] = [{
+                                    "key": "FFmpegExtractAudio",
+                                    "preferredcodec": "mp3",
+                                    "preferredquality": "192",
+                                }]
+                            else:
+                                ydl_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio/18/best"
                         else:
-                            ydl_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio/18/best"
+                            # Fast M4A AAC
+                            ydl_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio/best"
                     else:
-                        if "720p" in selected_format:
+                        if "360p" in selected_format:
+                            # Explicit 360p fast mode
+                            ydl_opts["format"] = "18/best[height<=360][ext=mp4]/best[height<=360]/best"
+                        elif "720p" in selected_format:
+                            # Explicit 720p HD mode
                             if has_ffmpeg:
-                                ydl_opts["format"] = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
+                                ydl_opts["format"] = "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/22/best[height<=720]/18/best"
                             else:
-                                ydl_opts["format"] = "22/best[height<=720][ext=mp4]/18/best/bestvideo[height<=720]+bestaudio/best"
-                        elif "360p" in selected_format:
-                            ydl_opts["format"] = "18/best[height<=360][ext=mp4]/best[ext=mp4]/best"
+                                ydl_opts["format"] = "22/best[height<=720][ext=mp4]/best[height<=720]/18/best"
                         else:
-                            # Best Available
+                            # Max Quality: 1080p Full HD -> 720p HD -> 360p (Max to Min priority)
                             if has_ffmpeg:
-                                ydl_opts["format"] = "bestvideo*+bestaudio/22/18/best"
+                                ydl_opts["format"] = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/22/best[height<=1080]/best[height<=720]/18/best"
                             else:
-                                ydl_opts["format"] = "18/22/best[ext=mp4]/best/bestvideo*+bestaudio"
+                                ydl_opts["format"] = "22/best[height<=1080][ext=mp4]/best[height<=720][ext=mp4]/18/best[ext=mp4]/best"
 
                     # 1. Fast metadata extraction to inspect if target is a playlist
                     flat_opts = dict(ydl_opts)
