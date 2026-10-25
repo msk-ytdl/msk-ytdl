@@ -176,6 +176,45 @@ def extract_youtube_url(text: str) -> Optional[str]:
     return normalize_youtube_url(text)
 
 
+def sanitize_storage_filename(title: Optional[str], default_name: str = "MSK_Video") -> str:
+    """Sanitize title for Android filesystem: strip non-ASCII, emojis, symbols, and length-cap to 35 chars."""
+    if not title:
+        return default_name
+    clean = safe_display_text(title)
+    # Strip forbidden filesystem chars
+    clean = re.sub(r'[\\/*?:"<>|#%&{}\\<>*?/$!\'":@]', "", clean)
+    clean = re.sub(r'\s+', ' ', clean).strip()
+    if not clean or clean.lower() == "videoplayback":
+        clean = default_name
+    return clean[:35].strip()
+
+
+def get_canonical_video_url(item: Dict[str, Any], fallback_url: str = "") -> str:
+    """
+    Ensure yt-dlp receives a canonical watch URL (with 11-char ID)
+    so it invokes the proper YouTube extractor and never downloads as 'videoplayback.mp4'.
+    """
+    vid_id = item.get("id")
+    if vid_id and len(str(vid_id)) == 11 and re.match(r"^[a-zA-Z0-9_-]{11}$", str(vid_id)):
+        return f"https://www.youtube.com/watch?v={vid_id}"
+
+    # Extract ID from webpage_url, url, or fallback_url
+    for cand in (item.get("webpage_url"), item.get("url"), fallback_url):
+        if not cand or not isinstance(cand, str):
+            continue
+        m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/|live/)([a-zA-Z0-9_-]{11})", cand)
+        if m:
+            return f"https://www.youtube.com/watch?v={m.group(1)}"
+
+    # If it's a playlist URL or non-YouTube URL, return it directly if not a direct CDN stream
+    for cand in (fallback_url, item.get("webpage_url"), item.get("url")):
+        if cand and isinstance(cand, str) and "googlevideo.com" not in cand and "videoplayback" not in cand:
+            return cand
+
+    return fallback_url
+
+
+
 def safe_display_text(text: Optional[str]) -> str:
     """
     Sanitize text to render cleanly on Android Kivy without missing-glyph tofu square boxes [].
@@ -2034,12 +2073,17 @@ if KIVY_AVAILABLE:
                     import yt_dlp
                     safe_logger = AndroidYTDLLogger()
                     ydl_opts = {
-                        "extract_flat": True,
+                        "extract_flat": "in_playlist",
                         "skip_download": True,
                         "logger": safe_logger,
                         "socket_timeout": 15,
                         "quiet": True,
                         "no_warnings": True,
+                        "extractor_args": {
+                            "youtube": {
+                                "player_client": ["android", "web"]
+                            }
+                        },
                     }
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         info = ydl.extract_info(url, download=False)
@@ -2053,7 +2097,8 @@ if KIVY_AVAILABLE:
                         thumb = info.get("thumbnail") or ""
 
                         if is_playlist:
-                            entries = list(info.get("entries") or [])
+                            raw_entries = list(info.get("entries") or [])
+                            entries = [e for e in raw_entries if e]
                             count = len(entries)
                             meta_str = f"Playlist ({count} videos) • {uploader}"
                             if entries and not thumb:
@@ -2386,16 +2431,13 @@ if KIVY_AVAILABLE:
                             )
 
                     has_ffmpeg = bool(shutil.which("ffmpeg"))
-
-                    # Safe filename template (limited to 40 chars + ASCII restricted to prevent [Errno 36])
-                    safe_outtmpl = str(target_dir / "%(title).40s [%(id)s].%(ext)s")
                     safe_logger = AndroidYTDLLogger()
 
-                    ydl_opts = {
-                        "outtmpl": safe_outtmpl,
-                        "restrictfilenames": True,      # CRITICAL: Replaces non-ASCII & special chars to prevent Android FUSE Errno 36
-                        "windowsfilenames": True,       # CRITICAL: Strips forbidden characters across all filesystems
-                        "trim_file_name": 50,           # CRITICAL: Hard caps filename length to 50 chars
+                    # Base options for downloading individual media items cleanly
+                    base_ydl_opts = {
+                        "restrictfilenames": True,      # Replaces non-ASCII & special characters to prevent Android Errno 36
+                        "windowsfilenames": True,       # Strips forbidden filesystem characters across all filesystems
+                        "trim_file_name": 45,           # Hard caps filename length to 45 chars
                         "progress_hooks": [progress_hook],
                         "logger": safe_logger,
                         "socket_timeout": 35,
@@ -2403,12 +2445,15 @@ if KIVY_AVAILABLE:
                         "quiet": True,
                         "no_warnings": True,
                         "no_color": True,
+                        "nooverwrites": False,          # Prevent silent skip when downloading new videos
+                        "continuedl": False,            # Clean download stream
+                        "noplaylist": True,             # In per-item loop, download single video without re-extracting playlist
                         "concurrent_fragment_downloads": 4,
                         "buffersize": 1048576,
                         "http_chunk_size": 10485760,
                         "extractor_args": {
                             "youtube": {
-                                "player_client": ["android", "ios", "web", "mweb"]
+                                "player_client": ["android", "web"]
                             }
                         },
                     }
@@ -2416,38 +2461,48 @@ if KIVY_AVAILABLE:
                     if is_audio:
                         if "MP3" in selected_format:
                             if has_ffmpeg:
-                                ydl_opts["format"] = "bestaudio/best"
-                                ydl_opts["postprocessors"] = [{
+                                base_ydl_opts["format"] = "bestaudio/best"
+                                base_ydl_opts["postprocessors"] = [{
                                     "key": "FFmpegExtractAudio",
                                     "preferredcodec": "mp3",
                                     "preferredquality": "192",
                                 }]
                             else:
-                                ydl_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio/18/best"
+                                base_ydl_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio/18/best"
                         else:
                             # Fast M4A AAC
-                            ydl_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio/best"
+                            base_ydl_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio/best"
                     else:
                         if "360p" in selected_format:
                             # Explicit 360p fast mode
-                            ydl_opts["format"] = "18/best[height<=360][ext=mp4]/best[height<=360]/best"
+                            base_ydl_opts["format"] = "18/best[height<=360][vcodec!=none][acodec!=none]/best"
                         elif "720p" in selected_format:
                             # Explicit 720p HD mode
                             if has_ffmpeg:
-                                ydl_opts["format"] = "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/22/best[height<=720]/18/best"
+                                base_ydl_opts["format"] = "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/22/best[height<=720]/18/best"
                             else:
-                                ydl_opts["format"] = "22/best[height<=720][ext=mp4]/best[height<=720]/18/best"
+                                base_ydl_opts["format"] = "22/best[height<=720][vcodec!=none][acodec!=none]/18/best"
                         else:
                             # Max Quality: 1080p Full HD -> 720p HD -> 360p (Max to Min priority)
                             if has_ffmpeg:
-                                ydl_opts["format"] = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/22/best[height<=1080]/best[height<=720]/18/best"
+                                base_ydl_opts["format"] = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/22/best[height<=1080]/best[height<=720]/18/best"
                             else:
-                                ydl_opts["format"] = "22/best[height<=1080][ext=mp4]/best[height<=720][ext=mp4]/18/best[ext=mp4]/best"
+                                base_ydl_opts["format"] = "22/best[height<=1080][vcodec!=none][acodec!=none]/best[height<=720][vcodec!=none][acodec!=none]/18/best"
 
-                    # 1. Fast metadata extraction to inspect if target is a playlist
-                    flat_opts = dict(ydl_opts)
-                    flat_opts["extract_flat"] = True
-                    flat_opts["progress_hooks"] = []
+                    # 1. Fast metadata extraction (without format restrictions) to inspect playlist vs single video
+                    flat_opts = {
+                        "extract_flat": "in_playlist",
+                        "skip_download": True,
+                        "logger": safe_logger,
+                        "socket_timeout": 25,
+                        "quiet": True,
+                        "no_warnings": True,
+                        "extractor_args": {
+                            "youtube": {
+                                "player_client": ["android", "web"]
+                            }
+                        },
+                    }
                     with yt_dlp.YoutubeDL(flat_opts) as flat_ydl:
                         media_meta = flat_ydl.extract_info(url, download=False)
 
@@ -2471,97 +2526,133 @@ if KIVY_AVAILABLE:
                     saved_files: List[Path] = []
                     skipped_count = 0
 
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        # Download items (handles both single video and multi-item playlist)
-                        for idx, item in enumerate(entries, start=1):
-                            item_title = item.get("title") or f"Item {idx}"
-                            current_item_meta["index"] = idx
-                            current_item_meta["title"] = item_title
-                            item_id = item.get("id")
-                            item_url = item.get("url") or item.get("webpage_url") or (f"https://www.youtube.com/watch?v={item_id}" if item_id else url)
-                            item_thumb = item.get("thumbnail") or (f"https://i.ytimg.com/vi/{item_id}/hqdefault.jpg" if item_id else None)
-                            item_uploader = item.get("uploader") or item.get("channel") or media_meta.get("uploader") or "MSK YTDL"
+                    # 2. Iterate through items and download each with canonical watch URL and unique ID
+                    for idx, item in enumerate(entries, start=1):
+                        raw_item_title = item.get("title") or f"Item {idx}"
+                        clean_title = sanitize_storage_filename(raw_item_title, f"Video_{idx}")
+                        item_id = item.get("id") or ""
+                        if not item_id:
+                            for cand in (item.get("webpage_url"), item.get("url")):
+                                if cand and isinstance(cand, str):
+                                    m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/|live/)([a-zA-Z0-9_-]{11})", cand)
+                                    if m:
+                                        item_id = m.group(1)
+                                        break
 
-                            if total_count > 1:
-                                overall_start_pct = int(((idx - 1) / total_count) * 100)
+                        # CRITICAL: Always resolve canonical watch URL so yt-dlp uses YouTube extractor, not generic videoplayback
+                        item_url = get_canonical_video_url(item, fallback_url=url)
+                        item_thumb = item.get("thumbnail") or (f"https://i.ytimg.com/vi/{item_id}/hqdefault.jpg" if item_id else None)
+                        item_uploader = item.get("uploader") or item.get("channel") or media_meta.get("uploader") or "MSK YTDL"
+
+                        current_item_meta["index"] = idx
+                        current_item_meta["title"] = raw_item_title
+
+                        if total_count > 1:
+                            overall_start_pct = int(((idx - 1) / total_count) * 100)
+                            Clock.schedule_once(
+                                lambda dt, i=idx, tot=total_count, t=raw_item_title, p=overall_start_pct: self.update_status(
+                                    f"Starting [{i}/{tot}]: {safe_display_text(t)[:28]}...", p
+                                )
+                            )
+                            self.notification_manager.show_progress(f"[{idx}/{total_count}] {raw_item_title}", overall_start_pct)
+
+                        # Set individual item output template with clean title and unique ID
+                        item_opts = dict(base_ydl_opts)
+                        if total_count > 1:
+                            item_opts["outtmpl"] = str(target_dir / f"[{idx:02d}] %(title).35s [%(id)s].%(ext)s")
+                        else:
+                            item_opts["outtmpl"] = str(target_dir / "%(title).40s [%(id)s].%(ext)s")
+
+                        try:
+                            with yt_dlp.YoutubeDL(item_opts) as ydl:
+                                info = ydl.extract_info(item_url, download=True)
+                        except Exception as dl_err:
+                            err_str = str(dl_err)
+                            if "File name too long" in err_str or "Errno 36" in err_str:
+                                print(f"[Download] Retrying with short ID filename due to: {err_str}")
+                                fallback_opts = dict(item_opts)
+                                fallback_opts["outtmpl"] = str(target_dir / "%(id)s.%(ext)s")
+                                with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
+                                    info = ydl_fb.extract_info(item_url, download=True)
+                            elif total_count > 1:
+                                print(f"[Playlist] Skipping item #{idx} ({raw_item_title}) due to: {dl_err}")
+                                skipped_count += 1
                                 Clock.schedule_once(
-                                    lambda dt, i=idx, tot=total_count, t=item_title, p=overall_start_pct: self.update_status(
-                                        f"Starting [{i}/{tot}]: {t[:28]}...", p
+                                    lambda dt, i=idx, tot=total_count: self.update_status(
+                                        f"[color=#FFA000]Skipped unplayable item {i}/{tot}[/color]", int((i / tot) * 100)
                                     )
                                 )
-                                self.notification_manager.show_progress(f"[{idx}/{total_count}] {item_title}", overall_start_pct)
-
-                            # Execute download with automatic fallback if filename too long occurs
-                            try:
-                                info = ydl.extract_info(item_url, download=True)
-                            except Exception as dl_err:
-                                err_str = str(dl_err)
-                                if "File name too long" in err_str or "Errno 36" in err_str:
-                                    print(f"[Download] Retrying with short ID filename due to: {err_str}")
-                                    fallback_opts = dict(ydl_opts)
-                                    fallback_opts["outtmpl"] = str(target_dir / "%(id)s.%(ext)s")
-                                    with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
-                                        info = ydl_fb.extract_info(item_url, download=True)
-                                elif total_count > 1:
-                                    print(f"[Playlist] Skipping item #{idx} ({item_title}) due to: {dl_err}")
-                                    skipped_count += 1
-                                    Clock.schedule_once(
-                                        lambda dt, i=idx, tot=total_count: self.update_status(
-                                            f"[color=#FFA000]Skipped unplayable item {i}/{tot}[/color]", int((i / tot) * 100)
-                                        )
-                                    )
-                                    continue
-                                else:
-                                    raise
-
-                            if not info:
                                 continue
+                            else:
+                                raise
 
-                            # Locate saved file
-                            saved_path: Optional[Path] = None
-                            if "requested_downloads" in info and info["requested_downloads"]:
-                                fp = info["requested_downloads"][0].get("filepath")
-                                if fp and Path(fp).exists():
-                                    saved_path = Path(fp)
+                        if not info:
+                            continue
 
-                            if not saved_path:
+                        # Locate saved file
+                        saved_path: Optional[Path] = None
+                        if "requested_downloads" in info and info["requested_downloads"]:
+                            fp = info["requested_downloads"][0].get("filepath")
+                            if fp and Path(fp).exists():
+                                saved_path = Path(fp)
+
+                        if not saved_path:
+                            try:
                                 prepared = ydl.prepare_filename(info)
                                 if Path(prepared).exists():
                                     saved_path = Path(prepared)
-                                else:
-                                    cand_id = info.get("id") or item_id
-                                    if cand_id:
-                                        candidates = list(target_dir.glob(f"*{cand_id}*"))
-                                        if candidates:
-                                            saved_path = candidates[0]
+                            except Exception:
+                                pass
 
-                            if saved_path and saved_path.exists():
-                                # Feature 5: Embed High-Quality Album Art & Tags for MP3/M4A
-                                if is_audio:
-                                    embed_audio_metadata(saved_path, item_title, item_uploader, item_thumb)
+                        if not saved_path and item_id:
+                            candidates = list(target_dir.glob(f"*{item_id}*"))
+                            if candidates:
+                                saved_path = candidates[0]
 
-                                # Register in Android MediaStore Gallery / Music library
-                                scan_media_file(saved_path)
-                                saved_files.append(saved_path)
+                        # Critical safety: Check if file was saved as 'videoplayback' and rename immediately
+                        if not saved_path or "videoplayback" in saved_path.name.lower():
+                            for p in target_dir.glob("*videoplayback*"):
+                                if p.is_file():
+                                    ext = p.suffix or (".mp4" if not is_audio else ".m4a")
+                                    fixed_name = f"[{idx:02d}] {clean_title} [{item_id}]{ext}" if total_count > 1 else f"{clean_title} [{item_id}]{ext}"
+                                    renamed_file = target_dir / fixed_name
+                                    try:
+                                        if not renamed_file.exists():
+                                            p.rename(renamed_file)
+                                            saved_path = renamed_file
+                                        else:
+                                            saved_path = p
+                                    except Exception:
+                                        saved_path = p
+                                    break
 
-                        # Download Complete Actions
-                        if saved_files:
-                            last_file = saved_files[-1]
-                            if total_count > 1:
-                                msg = f"[color=#00E676]Playlist Complete![/color] {len(saved_files)} of {total_count} saved."
-                                self.notification_manager.show_finished("MSK YTDL Playlist", f"{len(saved_files)} videos saved")
-                            else:
-                                msg = f"[color=#00E676]Done![/color] Saved: {last_file.name}"
-                                self.notification_manager.show_finished("MSK YTDL", last_file.name)
+                        if saved_path and saved_path.exists():
+                            # Embed HQ Album Art & ID3 Tags for Audio
+                            if is_audio:
+                                embed_audio_metadata(saved_path, raw_item_title, item_uploader, item_thumb)
 
-                            Clock.schedule_once(lambda dt, m=msg: self.update_status(m, 100))
+                            # Register in Android MediaStore Gallery / Music library
+                            scan_media_file(saved_path)
+                            saved_files.append(saved_path)
+
+                    # Download Complete Actions
+                    if saved_files:
+                        last_file = saved_files[-1]
+                        if total_count > 1:
+                            msg = f"[color=#00E676]Playlist Complete![/color] {len(saved_files)} of {total_count} saved."
+                            self.notification_manager.show_finished("MSK YTDL Playlist", f"{len(saved_files)} videos saved")
                         else:
-                            Clock.schedule_once(
-                                lambda dt: self.update_status("[color=#00E676]Download completed![/color]", 100)
-                            )
+                            msg = f"[color=#00E676]Done![/color] Saved: {last_file.name[:32]}"
+                            self.notification_manager.show_finished("MSK YTDL", last_file.name[:32])
 
-                        # Refresh library listing and update tab badge automatically
-                        Clock.schedule_once(lambda dt: self.refresh_library(), 0.5)
+                        Clock.schedule_once(lambda dt, m=msg: self.update_status(m, 100))
+                    else:
+                        Clock.schedule_once(
+                            lambda dt: self.update_status("[color=#00E676]Download completed![/color]", 100)
+                        )
+
+                    # Refresh offline library listing and badge
+                    Clock.schedule_once(lambda dt: self.refresh_library(), 0.5)
 
                 except Exception as e:
                     import traceback
@@ -2591,7 +2682,11 @@ if KIVY_AVAILABLE:
                         )
                     )
                 finally:
-                    Clock.schedule_once(lambda dt: setattr(self.download_btn, "disabled", False))
+                    def reset_ui_state(dt=None):
+                        self.download_btn.disabled = False
+                        self.download_btn.text = "DOWNLOAD NOW"
+                        self.current_preview_url = ""
+                    Clock.schedule_once(reset_ui_state)
 
             threading.Thread(target=worker, daemon=True).start()
 
