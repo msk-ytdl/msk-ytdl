@@ -5,7 +5,12 @@ from mobile_app import (
     get_canonical_video_url,
     normalize_youtube_url,
     safe_display_text,
+    play_online_video,
+    open_web_url,
+    is_version_newer,
+    install_apk_file,
 )
+from unittest.mock import patch
 
 
 def test_sanitize_storage_filename():
@@ -35,3 +40,78 @@ def test_normalize_youtube_url():
     assert normalize_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ") == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
     assert normalize_youtube_url("https://youtu.be/dQw4w9WgXcQ") == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
     assert normalize_youtube_url("https://www.youtube.com/playlist?list=PL4cUxeGkcC9gUgr39Q_yD6v-bSyMwKPUI") == "https://www.youtube.com/playlist?list=PL4cUxeGkcC9gUgr39Q_yD6v-bSyMwKPUI"
+
+
+def test_play_online_video_safe():
+    # Should safely return on empty URL without exception
+    play_online_video("")
+    play_online_video(None)
+
+    with patch("subprocess.Popen") as mock_popen:
+        play_online_video("https://www.youtube.com/watch?v=dQw4w9WgXcQ", title="Test Song")
+        assert mock_popen.called
+
+
+def test_open_web_url_safe():
+    open_web_url("")
+    open_web_url(None)
+
+    with patch("webbrowser.open") as mock_web:
+        open_web_url("https://example.com")
+        assert mock_web.called
+
+
+def test_sanitize_storage_filename_keeps_long_names():
+    long_title = "Arijit Singh - Kesariya Audio Song from Brahmastra Ranbir Alia Pritam Amitabh"
+    sanitized = sanitize_storage_filename(long_title)
+    # Must preserve full title and not truncate at 35 characters
+    assert len(sanitized) > 50
+    assert "Kesariya" in sanitized
+    assert "Brahmastra" in sanitized
+
+
+def test_reels_icon_asset():
+    from pathlib import Path
+    reels_icon = Path("assets/icons/reels.png")
+    assert reels_icon.exists()
+    assert reels_icon.stat().st_size > 0
+
+
+def test_get_android_download_dir():
+    from mobile_app import get_android_download_dir
+    from pathlib import Path
+    d = get_android_download_dir()
+    assert isinstance(d, Path)
+    assert d.exists()
+
+
+def test_is_version_newer():
+    # Newer patch version
+    assert is_version_newer("1.0.1", "1.0.2") is True
+    # Newer minor version
+    assert is_version_newer("1.0.1", "1.1.0") is True
+    # Newer major version
+    assert is_version_newer("1.0.1", "2.0.0") is True
+    # Extra sub-level version
+    assert is_version_newer("1.0", "1.0.1") is True
+    # With 'v' prefix
+    assert is_version_newer("v1.0.1", "v1.0.2") is True
+
+    # Same version
+    assert is_version_newer("1.0.1", "1.0.1") is False
+    assert is_version_newer("1.0.0", "1.0") is False
+    # Older version
+    assert is_version_newer("1.0.2", "1.0.1") is False
+    assert is_version_newer("2.0.0", "1.9.9") is False
+    # Empty inputs
+    assert is_version_newer("1.0.1", "") is False
+    assert is_version_newer("", "1.0.1") is True
+
+
+def test_install_apk_file_safety():
+    # Non-existent file must return False safely
+    assert install_apk_file("non_existent_file_xyz.apk") is False
+    assert install_apk_file("") is False
+
+
+

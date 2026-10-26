@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 
 # Safe standard stream wrapper to protect against Android Logcat / Kivy buffer crashes
 class SafeLogStream:
@@ -224,7 +224,7 @@ def extract_youtube_url(text: str) -> Optional[str]:
 
 
 def sanitize_storage_filename(title: Optional[str], default_name: str = "MSK_Video") -> str:
-    """Sanitize title for Android filesystem: strip non-ASCII, emojis, symbols, and length-cap to 35 chars."""
+    """Sanitize title for filesystem: strip forbidden chars and preserve full readable name up to 140 chars."""
     if not title:
         return default_name
     clean = safe_display_text(title)
@@ -233,35 +233,38 @@ def sanitize_storage_filename(title: Optional[str], default_name: str = "MSK_Vid
     clean = re.sub(r'\s+', ' ', clean).strip()
     if not clean or clean.lower() == "videoplayback":
         clean = default_name
-    return clean[:35].strip()
+    return clean[:140].strip()
+
 
 
 def get_canonical_video_url(item: Dict[str, Any], fallback_url: str = "") -> str:
     """
     Ensure yt-dlp receives a canonical watch URL for YouTube or original clean URL for other platforms.
     """
-    target_plat = detect_media_platform(fallback_url or item.get("webpage_url", ""))
-    if target_plat != "YouTube":
-        return item.get("webpage_url") or item.get("url") or fallback_url
-
+    # 1. If valid 11-char YouTube ID is present, format canonical YouTube watch URL
     vid_id = item.get("id")
     if vid_id and len(str(vid_id)) == 11 and re.match(r"^[a-zA-Z0-9_-]{11}$", str(vid_id)):
         return f"https://www.youtube.com/watch?v={vid_id}"
 
-    # Extract ID from webpage_url, url, or fallback_url
+    # 2. Extract ID from webpage_url, url, or fallback_url
     for cand in (item.get("webpage_url"), item.get("url"), fallback_url):
-        if not cand or not isinstance(cand, str):
-            continue
-        m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/|live/)([a-zA-Z0-9_-]{11})", cand)
-        if m:
-            return f"https://www.youtube.com/watch?v={m.group(1)}"
+        if cand and isinstance(cand, str):
+            m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/|live/)([a-zA-Z0-9_-]{11})", cand)
+            if m:
+                return f"https://www.youtube.com/watch?v={m.group(1)}"
 
-    # If it's a playlist URL or non-YouTube URL, return it directly if not a direct CDN stream
+    # 3. For non-YouTube platforms, return original webpage_url or clean url
+    target_plat = detect_media_platform(fallback_url or item.get("webpage_url", "") or item.get("url", ""))
+    if target_plat != "YouTube":
+        return item.get("webpage_url") or item.get("url") or fallback_url
+
+    # 4. If it's a playlist URL or non-CDN URL, return it directly
     for cand in (fallback_url, item.get("webpage_url"), item.get("url")):
         if cand and isinstance(cand, str) and "googlevideo.com" not in cand and "videoplayback" not in cand:
             return cand
 
     return fallback_url
+
 
 
 
@@ -343,6 +346,81 @@ def get_app_version() -> str:
         return "1.0.1"
 
 
+def is_version_newer(current_version: str, remote_version: str) -> bool:
+    """Compare semver-like strings and return True if remote_version is strictly newer."""
+    if not remote_version:
+        return False
+    if not current_version:
+        return True
+
+    rem_clean = remote_version.lstrip("vV").strip()
+    curr_clean = current_version.lstrip("vV").strip()
+
+    rem_nums = [int(x) for x in re.findall(r"\d+", rem_clean)]
+    curr_nums = [int(x) for x in re.findall(r"\d+", curr_clean)]
+
+    if not rem_nums:
+        return False
+    if not curr_nums:
+        return True
+
+    for r, c in zip(rem_nums, curr_nums):
+        if r > c:
+            return True
+        elif r < c:
+            return False
+
+    if len(rem_nums) > len(curr_nums) and rem_nums[:len(curr_nums)] == curr_nums:
+        return any(x > 0 for x in rem_nums[len(curr_nums):])
+
+    return False
+
+
+def install_apk_file(apk_path: Union[str, Path]) -> bool:
+    """Prompt the Android Package Installer or OS to install a downloaded APK file."""
+    if not apk_path:
+        return False
+    apk_path = Path(apk_path)
+    if not str(apk_path).strip() or not apk_path.is_file():
+        return False
+    try:
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        Intent = autoclass("android.content.Intent")
+        Uri = autoclass("android.net.Uri")
+        File = autoclass("java.io.File")
+        Build = autoclass("android.os.Build")
+
+        activity = PythonActivity.mActivity
+        file_obj = File(str(apk_path.resolve()))
+        intent = Intent(Intent.ACTION_VIEW)
+
+        if Build.VERSION.SDK_INT >= 24:
+            try:
+                FileProvider = autoclass("androidx.core.content.FileProvider")
+                package_name = activity.getPackageName()
+                uri = FileProvider.getUriForFile(activity, f"{package_name}.fileprovider", file_obj)
+                intent.setDataAndType(uri, "application/vnd.android.package-archive")
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            except Exception:
+                uri = Uri.fromFile(file_obj)
+                intent.setDataAndType(uri, "application/vnd.android.package-archive")
+        else:
+            uri = Uri.fromFile(file_obj)
+            intent.setDataAndType(uri, "application/vnd.android.package-archive")
+
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        activity.startActivity(intent)
+        return True
+    except Exception as e:
+        print(f"[AutoUpdate] Native install intent notice: {e}")
+        try:
+            open_media_file(apk_path)
+            return True
+        except Exception:
+            return False
+
+
 def request_android_permissions():
     """Request runtime storage & notification permissions on Android (API 21 through 35)."""
     try:
@@ -385,14 +463,9 @@ def get_android_download_dir() -> Path:
         except Exception:
             return Path.home() / "Downloads"
 
-    candidates = [
-        Path("/storage/emulated/0/Download/YouTube"),
-        Path("/sdcard/Download/YouTube"),
-        Path("/storage/emulated/0/Download"),
-        Path("/sdcard/Download"),
-    ]
+    candidates = []
 
-    # Try app's private external files directory via PyJnius (always 100% writable on all Android versions)
+    # 1. Primary on Android: App's private external files directory via PyJnius (100% writable on all Android versions 4.4 - 15 without permission blocks)
     try:
         from jnius import autoclass
         PythonActivity = autoclass("org.kivy.android.PythonActivity")
@@ -404,7 +477,15 @@ def get_android_download_dir() -> Path:
     except Exception:
         pass
 
-    # App user_data_dir fallback
+    # 2. Public Download directory
+    candidates.extend([
+        Path("/storage/emulated/0/Download"),
+        Path("/sdcard/Download"),
+        Path("/storage/emulated/0/Download/YouTube"),
+        Path("/sdcard/Download/YouTube"),
+    ])
+
+    # 3. App user_data_dir fallback
     try:
         if KIVY_AVAILABLE:
             from kivy.app import App
@@ -491,10 +572,37 @@ def open_media_file(filepath: Path):
         print(f"[OpenMedia] Error opening file {filepath.name}: {e}")
 
 
-def play_online_video(video_url: str):
+def open_web_url(target_url: str):
+    """Open an external URL in the system browser or Android web intent."""
+    if not target_url:
+        return
+    clean_url = str(target_url).strip()
+    try:
+        if is_running_on_android():
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            Intent = autoclass("android.content.Intent")
+            Uri = autoclass("android.net.Uri")
+            activity = PythonActivity.mActivity
+            web_intent = Intent(Intent.ACTION_VIEW, Uri.parse(clean_url))
+            web_intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            activity.startActivity(web_intent)
+        else:
+            import webbrowser
+            webbrowser.open(clean_url)
+    except Exception as e:
+        print(f"[Web] Error opening url {clean_url}: {e}")
+
+
+def play_online_video(video_url: str, title: str = "Video Player"):
     """
-    Launch YouTube video stream in YouTube App on Android or default desktop web player.
-    Provides authentic official YouTube player experience with zero buffering, 1080p/4K, and full controls.
+    Play online video stream inside the app without redirecting to external YouTube app.
+    On Android:
+      Opens a high-performance in-app Dialog with hardware-accelerated WebView rendering
+      the responsive YouTube embedded player with full touch controls, pause, play, seek,
+      and an in-app Close button (keeps user 100% inside MSK YTDL).
+    On Desktop:
+      Launches a dedicated in-app companion player window via pywebview (or direct embed).
     """
     if not video_url:
         return
@@ -504,34 +612,183 @@ def play_online_video(video_url: str):
     if m:
         vid_id = m.group(1)
 
-    try:
-        if is_running_on_android():
+    embed_url = (
+        f"https://www.youtube-nocookie.com/embed/{vid_id}?autoplay=1&playsinline=1&rel=0&modestbranding=1"
+        if vid_id
+        else clean_url
+    )
+
+    if is_running_on_android():
+        try:
             from jnius import autoclass
-            PythonActivity = autoclass("org.kivy.android.PythonActivity")
-            Intent = autoclass("android.content.Intent")
-            Uri = autoclass("android.net.Uri")
-            activity = PythonActivity.mActivity
+            from android.runnable import run_on_ui_thread
 
-            if vid_id:
+            @run_on_ui_thread
+            def _launch_android_inapp_player():
                 try:
-                    # Direct YouTube App intent
-                    app_intent = Intent(Intent.ACTION_VIEW, Uri.parse(f"vnd.youtube:{vid_id}"))
-                    app_intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    activity.startActivity(app_intent)
-                    return
-                except Exception:
-                    pass
+                    PythonActivity = autoclass("org.kivy.android.PythonActivity")
+                    activity = PythonActivity.mActivity
+                    Dialog = autoclass("android.app.Dialog")
+                    WebView = autoclass("android.webkit.WebView")
+                    WebChromeClient = autoclass("android.webkit.WebChromeClient")
+                    WebViewClient = autoclass("android.webkit.WebViewClient")
+                    LinearLayout = autoclass("android.widget.LinearLayout")
+                    TextView = autoclass("android.widget.TextView")
+                    Button = autoclass("android.widget.Button")
+                    Gravity = autoclass("android.view.Gravity")
+                    Color = autoclass("android.graphics.Color")
+                    LayoutParams = autoclass("android.widget.LinearLayout$LayoutParams")
+                    Window = autoclass("android.view.Window")
+                    WindowManagerLayoutParams = autoclass("android.view.WindowManager$LayoutParams")
 
-            # Fallback to standard web intent
-            web_intent = Intent(Intent.ACTION_VIEW, Uri.parse(clean_url))
-            web_intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            activity.startActivity(web_intent)
-        else:
-            # Desktop fallback (Windows / macOS / Linux)
-            import webbrowser
-            webbrowser.open(clean_url)
-    except Exception as e:
-        print(f"[Player] Error launching player for {clean_url}: {e}")
+                    dialog = Dialog(activity)
+                    dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+
+                    root = LinearLayout(activity)
+                    root.setOrientation(LinearLayout.VERTICAL)
+                    root.setBackgroundColor(Color.parseColor("#0F141C"))
+
+                    # Top header bar: Title + Close Button
+                    header = LinearLayout(activity)
+                    header.setOrientation(LinearLayout.HORIZONTAL)
+                    header.setBackgroundColor(Color.parseColor("#171D27"))
+                    header.setGravity(Gravity.CENTER_VERTICAL)
+                    h_params = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
+                    header.setLayoutParams(h_params)
+                    header.setPadding(28, 18, 28, 18)
+
+                    tv = TextView(activity)
+                    disp_title = (title[:36] + "...") if len(title) > 38 else title
+                    tv.setText(f"▶ {disp_title}")
+                    tv.setTextColor(Color.parseColor("#FFD54F"))
+                    tv.setTextSize(15)
+                    tv_params = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1.0)
+                    tv.setLayoutParams(tv_params)
+                    header.addView(tv)
+
+                    close_btn = Button(activity)
+                    close_btn.setText("✕ CLOSE")
+                    close_btn.setTextColor(Color.WHITE)
+                    close_btn.setTextSize(13)
+                    close_btn.setBackgroundColor(Color.parseColor("#E53935"))
+                    close_btn.setPadding(20, 8, 20, 8)
+                    btn_params = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT)
+                    close_btn.setLayoutParams(btn_params)
+
+                    webview = WebView(activity)
+                    settings = webview.getSettings()
+                    settings.setJavaScriptEnabled(True)
+                    settings.setDomStorageEnabled(True)
+                    settings.setMediaPlaybackRequiresUserGesture(False)
+                    settings.setSupportZoom(True)
+                    settings.setBuiltInZoomControls(False)
+                    webview.setWebChromeClient(WebChromeClient())
+                    webview.setWebViewClient(WebViewClient())
+                    webview.setBackgroundColor(Color.BLACK)
+
+                    from jnius import PythonJavaClass, java_method
+
+                    class _CloseListener(PythonJavaClass):
+                        __javainterfaces__ = ["android/view/View$OnClickListener"]
+
+                        def __init__(self, d, wv):
+                            super().__init__()
+                            self.d = d
+                            self.wv = wv
+
+                        @java_method("(Landroid/view/View;)V")
+                        def onClick(self, v):
+                            try:
+                                self.wv.loadUrl("about:blank")
+                            except Exception:
+                                pass
+                            self.d.dismiss()
+
+                    close_btn.setOnClickListener(_CloseListener(dialog, webview))
+                    header.addView(close_btn)
+                    root.addView(header)
+
+                    wv_params = LayoutParams(LayoutParams.MATCH_PARENT, 0, 1.0)
+                    webview.setLayoutParams(wv_params)
+                    root.addView(webview)
+
+                    html_content = f"""
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+                        <style>
+                            body, html {{ margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }}
+                            .video-container {{ position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }}
+                            iframe {{ width: 100%; height: 100%; border: none; }}
+                        </style>
+                    </head>
+                    <body>
+                        <div class="video-container">
+                            <iframe src="{embed_url}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
+                        </div>
+                    </body>
+                    </html>
+                    """
+                    webview.loadDataWithBaseURL("https://www.youtube-nocookie.com", html_content, "text/html", "UTF-8", None)
+
+                    dialog.setContentView(root)
+                    w = dialog.getWindow()
+                    if w:
+                        w.setLayout(WindowManagerLayoutParams.MATCH_PARENT, WindowManagerLayoutParams.MATCH_PARENT)
+                    dialog.show()
+                except Exception as inner_e:
+                    print(f"[Player] Android native dialog error: {inner_e}")
+                    try:
+                        Intent = autoclass("android.content.Intent")
+                        Uri = autoclass("android.net.Uri")
+                        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+                        act = PythonActivity.mActivity
+                        in_app_intent = Intent(Intent.ACTION_VIEW, Uri.parse(embed_url))
+                        in_app_intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        act.startActivity(in_app_intent)
+                    except Exception as fb_err:
+                        print(f"[Player] Android fallback error: {fb_err}")
+
+            _launch_android_inapp_player()
+            return
+        except Exception as e:
+            print(f"[Player] Android in-app player setup notice: {e}")
+
+    # Desktop In-App Player (Windows / macOS / Linux)
+    try:
+        import subprocess
+        clean_title = safe_display_text(title or "MSK Video Player")
+        safe_t = re.sub(r'["\']', '', clean_title)[:55]
+        runner_code = f"""
+import sys
+try:
+    import webview
+    html_page = '''<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{safe_t}</title>
+<style>
+body, html {{ margin: 0; padding: 0; width: 100%; height: 100%; background: #0b0e14; overflow: hidden; }}
+iframe {{ width: 100%; height: 100%; border: none; }}
+</style>
+</head>
+<body>
+<iframe src="{embed_url}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+</body>
+</html>'''
+    win = webview.create_window('{safe_t} - MSK Player', html=html_page, width=880, height=530, background_color='#0b0e14')
+    webview.start()
+except Exception:
+    import webbrowser
+    webbrowser.open('{embed_url}')
+"""
+        subprocess.Popen([sys.executable, "-c", runner_code])
+    except Exception as d_err:
+        print(f"[Player] Desktop player launch notice: {d_err}")
+        import webbrowser
+        webbrowser.open(embed_url)
 
 
 def delete_media_file(filepath: Path) -> bool:
@@ -1278,8 +1535,9 @@ if KIVY_AVAILABLE:
             self.main_container = BoxLayout(orientation="vertical", size_hint_y=1.0)
             root.add_widget(self.main_container)
 
-            # Build all 3 Tab Views
+            # Build all 4 Tab Views
             self.home_view = self.build_home_view()
+            self.reels_view = self.build_reels_view()
             self.downloads_view = self.build_downloads_view()
             self.videos_view = self.build_videos_view()
 
@@ -1559,13 +1817,13 @@ if KIVY_AVAILABLE:
             modal.open()
 
         # -----------------------------------------------------------------
-        # Bottom Navigation Footer Bar Builder (Home / Videos / Downloads)
+        # Bottom Navigation Footer Bar Builder (Home / Reels / Videos / Downloads)
         # -----------------------------------------------------------------
         def create_bottom_nav(self) -> BoxLayout:
             nav_bar = StyledCard(
                 orientation="horizontal",
-                padding=[dp(6), dp(3)],
-                spacing=dp(6),
+                padding=[dp(4), dp(3)],
+                spacing=dp(4),
                 size_hint_y=None,
                 height=dp(56),
                 bg_color=(0.07, 0.08, 0.13, 1.0),
@@ -1574,6 +1832,10 @@ if KIVY_AVAILABLE:
             self.nav_btn_home = NavTabItem("home", "home.png", "HOME", is_active=True)
             self.nav_btn_home.bind(on_press=lambda ins: self.switch_tab("home"))
             nav_bar.add_widget(self.nav_btn_home)
+
+            self.nav_btn_reels = NavTabItem("reels", "reels.png", "REELS", is_active=False)
+            self.nav_btn_reels.bind(on_press=lambda ins: self.switch_tab("reels"))
+            nav_bar.add_widget(self.nav_btn_reels)
 
             self.nav_btn_videos = NavTabItem("videos", "videos.png", "VIDEOS", is_active=False)
             self.nav_btn_videos.bind(on_press=lambda ins: self.switch_tab("videos"))
@@ -1596,11 +1858,16 @@ if KIVY_AVAILABLE:
             self.main_container.clear_widgets()
 
             self.nav_btn_home.set_active(tab_name == "home")
+            if hasattr(self, "nav_btn_reels"):
+                self.nav_btn_reels.set_active(tab_name == "reels")
             self.nav_btn_videos.set_active(tab_name == "videos")
             self.nav_btn_downloads.set_active(tab_name == "downloads")
 
             if tab_name == "home":
                 self.main_container.add_widget(self.home_view)
+            elif tab_name == "reels":
+                self.main_container.add_widget(self.reels_view)
+                Clock.schedule_once(lambda dt: self.populate_reels(), 0.05)
             elif tab_name == "downloads":
                 self.main_container.add_widget(self.downloads_view)
                 Clock.schedule_once(lambda dt: self.refresh_library(), 0.05)
@@ -1874,12 +2141,14 @@ if KIVY_AVAILABLE:
 
             self.home_category_chips = {}
             categories = [
-                ("TRENDING", "Trending Videos 2026"),
-                ("MUSIC", "Top Music Hits 2026"),
-                ("GAMING", "Trending Gaming Highlights"),
-                ("TECH", "Latest Tech & AI News"),
-                ("SHORTS", "Popular YouTube Shorts"),
-                ("LO-FI", "Relaxing LoFi Beats Chill"),
+                ("🔥 ALL", "Trending Videos 2026"),
+                ("🎵 MUSIC", "Top Bollywood English Music Hits"),
+                ("😂 COMEDY", "Trending Comedy Standup"),
+                ("🎬 MOVIES", "Latest Movie Trailers Teasers"),
+                ("⚡ SHORTS", "Popular Viral Shorts"),
+                ("🎮 GAMING", "Trending Gaming Highlights"),
+                ("📻 LO-FI", "Relaxing LoFi Chill Beats"),
+                ("💻 TECH", "Latest Tech & AI News"),
             ]
             for cat_name, cat_query in categories:
                 btn = Button(
@@ -1958,26 +2227,38 @@ if KIVY_AVAILABLE:
                 padding=[dp(14), dp(12)],
                 spacing=dp(8),
                 size_hint_y=None,
-                height=dp(88),
+                height=dp(94),
                 bg_color=(0.09, 0.11, 0.17, 1.0),
             )
-            top_row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(28))
+            top_row = BoxLayout(orientation="horizontal", spacing=dp(6), size_hint_y=None, height=dp(28))
             self.downloads_title_lbl = Label(
-                text="[b]Downloaded Media Library[/b]",
+                text="[b]Offline Media & Playlists[/b]",
                 markup=True,
-                font_size="14sp",
+                font_size="13sp",
                 color=(0.95, 0.95, 1.0, 1.0),
                 halign="left",
             )
             self.downloads_title_lbl.bind(size=self.downloads_title_lbl.setter("text_size"))
             top_row.add_widget(self.downloads_title_lbl)
 
+            play_all_btn = IconActionButton(
+                icon_path="play.png",
+                text="▶ PLAY ALL",
+                font_size="10.5sp",
+                size_hint=(None, None),
+                size=(dp(90), dp(28)),
+                bg_color=(0.10, 0.55, 0.28, 1.0),
+                text_color=(1.0, 1.0, 1.0, 1.0),
+            )
+            play_all_btn.bind(on_press=lambda ins: self.play_all_playlist())
+            top_row.add_widget(play_all_btn)
+
             refresh_btn = IconActionButton(
                 icon_path="shuffle.png",
                 text="REFRESH",
-                font_size="11sp",
+                font_size="10.5sp",
                 size_hint=(None, None),
-                size=(dp(96), dp(28)),
+                size=(dp(84), dp(28)),
                 bg_color=(0.18, 0.22, 0.32, 1.0),
                 text_color=(1.0, 0.75, 0.0, 1.0),
             )
@@ -1985,38 +2266,38 @@ if KIVY_AVAILABLE:
             top_row.add_widget(refresh_btn)
             lib_header_card.add_widget(top_row)
 
-            # Filter Row: [ALL] [VIDEOS] [AUDIO]
-            filter_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(30))
+            # Filter Row: [📂 ALL] [🎵 SONGS (PLAYLIST)] [🎬 VIDEOS]
+            filter_row = BoxLayout(orientation="horizontal", spacing=dp(6), size_hint_y=None, height=dp(30))
             self.filter_btn_all = Button(
-                text="ALL",
-                font_size="11sp",
+                text="📂 ALL",
+                font_size="10.5sp",
                 bold=True,
                 background_color=(0.18, 0.24, 0.36, 1.0),
                 color=(1, 0.75, 0, 1),
             )
             self.filter_btn_all.bind(on_press=lambda ins: self.set_downloads_filter("all"))
 
-            self.filter_btn_videos = Button(
-                text="VIDEOS (.mp4)",
-                font_size="11sp",
-                bold=True,
-                background_color=(0.12, 0.14, 0.20, 1.0),
-                color=(0.7, 0.75, 0.85, 1),
-            )
-            self.filter_btn_videos.bind(on_press=lambda ins: self.set_downloads_filter("videos"))
-
             self.filter_btn_audio = Button(
-                text="AUDIO (.mp3)",
-                font_size="11sp",
+                text="🎵 SONGS (PLAYLIST)",
+                font_size="10sp",
                 bold=True,
                 background_color=(0.12, 0.14, 0.20, 1.0),
                 color=(0.7, 0.75, 0.85, 1),
             )
             self.filter_btn_audio.bind(on_press=lambda ins: self.set_downloads_filter("audio"))
 
+            self.filter_btn_videos = Button(
+                text="🎬 VIDEOS",
+                font_size="10.5sp",
+                bold=True,
+                background_color=(0.12, 0.14, 0.20, 1.0),
+                color=(0.7, 0.75, 0.85, 1),
+            )
+            self.filter_btn_videos.bind(on_press=lambda ins: self.set_downloads_filter("videos"))
+
             filter_row.add_widget(self.filter_btn_all)
-            filter_row.add_widget(self.filter_btn_videos)
             filter_row.add_widget(self.filter_btn_audio)
+            filter_row.add_widget(self.filter_btn_videos)
             lib_header_card.add_widget(filter_row)
 
             content.add_widget(lib_header_card)
@@ -2033,6 +2314,21 @@ if KIVY_AVAILABLE:
             scroll.add_widget(content)
             return scroll
 
+        def play_all_playlist(self):
+            """Start continuous offline playback of all downloaded audio tracks."""
+            target_dir = get_android_download_dir()
+            audio_files = []
+            for ext in ("*.mp3", "*.m4a", "*.wav", "*.ogg"):
+                audio_files.extend(target_dir.glob(ext))
+            audio_files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+            if not audio_files:
+                self.update_status("[color=#FFB300]No audio tracks found! Download audio to build playlist.[/color]", 0)
+                return
+            self.audio_playlist = audio_files
+            self.audio_index = 0
+            self.play_audio_track(self.audio_playlist[0])
+            self.update_status(f"[color=#00E676]Playing playlist:[/color] 1 of {len(audio_files)} tracks", 0)
+
         def set_downloads_filter(self, filter_type: str):
             self.active_filter = filter_type
             inactive_bg = (0.12, 0.14, 0.20, 1.0)
@@ -2043,11 +2339,11 @@ if KIVY_AVAILABLE:
             self.filter_btn_all.background_color = active_bg if filter_type == "all" else inactive_bg
             self.filter_btn_all.color = active_col if filter_type == "all" else inactive_col
 
-            self.filter_btn_videos.background_color = active_bg if filter_type == "videos" else inactive_bg
-            self.filter_btn_videos.color = active_col if filter_type == "videos" else inactive_col
-
             self.filter_btn_audio.background_color = active_bg if filter_type == "audio" else inactive_bg
             self.filter_btn_audio.color = active_col if filter_type == "audio" else inactive_col
+
+            self.filter_btn_videos.background_color = active_bg if filter_type == "videos" else inactive_bg
+            self.filter_btn_videos.color = active_col if filter_type == "videos" else inactive_col
 
             self.refresh_library()
 
@@ -2211,6 +2507,363 @@ if KIVY_AVAILABLE:
 
             scroll.add_widget(content)
             return scroll
+
+        # -----------------------------------------------------------------
+        # View 4: Reels & Shorts Vertical Feed View
+        # -----------------------------------------------------------------
+        def build_reels_view(self) -> ScrollView:
+            scroll = ScrollView(do_scroll_x=False, do_scroll_y=True)
+            content = BoxLayout(
+                orientation="vertical",
+                padding=[dp(12), dp(10), dp(12), dp(24)],
+                spacing=dp(12),
+                size_hint_y=None,
+            )
+            content.bind(minimum_height=content.setter("height"))
+
+            # Header Card
+            reels_header = StyledCard(
+                orientation="vertical",
+                padding=[dp(14), dp(10)],
+                spacing=dp(3),
+                size_hint_y=None,
+                height=dp(58),
+                bg_color=(0.12, 0.09, 0.20, 1.0),
+            )
+            r_title = Label(
+                text="[b]🔥 Trending Reels & Shorts[/b]",
+                markup=True,
+                font_size="15sp",
+                color=(1.0, 0.45, 0.65, 1.0),
+                size_hint_y=None,
+                height=dp(20),
+                halign="left",
+            )
+            r_title.bind(size=r_title.setter("text_size"))
+            r_sub = Label(
+                text="Vertical video stream • Watch In-App • 1-Tap Download & Background Audio",
+                font_size="10.5sp",
+                color=(0.80, 0.75, 0.90, 1.0),
+                size_hint_y=None,
+                height=dp(16),
+                halign="left",
+            )
+            r_sub.bind(size=r_sub.setter("text_size"))
+            reels_header.add_widget(r_title)
+            reels_header.add_widget(r_sub)
+            content.add_widget(reels_header)
+
+            # Reels Category Filter Chips
+            reels_cat_scroll = ScrollView(do_scroll_x=True, do_scroll_y=False, size_hint_y=None, height=dp(34))
+            reels_cat_box = BoxLayout(orientation="horizontal", spacing=dp(6), size_hint_x=None)
+            reels_cat_box.bind(minimum_width=reels_cat_box.setter("width"))
+
+            reel_categories = [
+                ("🔥 Trending", "trending"),
+                ("😂 Comedy", "comedy"),
+                ("🎵 Music Reels", "music"),
+                ("🕺 Dance Beats", "dance"),
+                ("⚡ Viral Hacks", "viral"),
+                ("📱 Tech Shorts", "tech"),
+            ]
+            self.reels_chips = {}
+            self.active_reels_category = "trending"
+
+            for label, cat_key in reel_categories:
+                btn = Button(
+                    text=label,
+                    font_size="11sp",
+                    bold=True,
+                    size_hint=(None, None),
+                    size=(dp(len(label) * 9 + 20), dp(30)),
+                    background_color=(0.40, 0.15, 0.50, 1.0) if cat_key == "trending" else (0.13, 0.14, 0.22, 1.0),
+                    color=(1, 1, 1, 1) if cat_key == "trending" else (0.75, 0.80, 0.90, 1.0),
+                )
+                btn.bind(on_press=lambda ins, k=cat_key: self.filter_reels(k))
+                self.reels_chips[cat_key] = btn
+                reels_cat_box.add_widget(btn)
+
+            reels_cat_scroll.add_widget(reels_cat_box)
+            content.add_widget(reels_cat_scroll)
+
+            # Vertical Feed Container for Reels
+            self.reels_feed_container = BoxLayout(
+                orientation="vertical",
+                spacing=dp(14),
+                size_hint_y=None,
+            )
+            self.reels_feed_container.bind(minimum_height=self.reels_feed_container.setter("height"))
+            content.add_widget(self.reels_feed_container)
+
+            scroll.add_widget(content)
+            return scroll
+
+        def filter_reels(self, cat_key: str):
+            """Filter reels feed by category key."""
+            self.active_reels_category = cat_key
+            for k, btn in self.reels_chips.items():
+                if k == cat_key:
+                    btn.background_color = (0.40, 0.15, 0.50, 1.0)
+                    btn.color = (1.0, 1.0, 1.0, 1.0)
+                else:
+                    btn.background_color = (0.13, 0.14, 0.22, 1.0)
+                    btn.color = (0.75, 0.80, 0.90, 1.0)
+            self.populate_reels(category=cat_key)
+
+        def populate_reels(self, category: str = "trending"):
+            """Load vertical reel video items for the selected category."""
+            if not hasattr(self, "reels_feed_container"):
+                return
+            self.reels_feed_container.clear_widgets()
+
+            all_reels = [
+                {
+                    "title": "When Mom Finds Your Secret Stash 😂 #Shorts #Comedy",
+                    "channel": "Comedy King",
+                    "duration": "0:38",
+                    "url": "https://www.youtube.com/shorts/q6EoRBvdVPQ",
+                    "thumb": "https://i.ytimg.com/vi/q6EoRBvdVPQ/hqdefault.jpg",
+                    "category": "comedy",
+                },
+                {
+                    "title": "Viral Indian Street Food Magic! 🇮🇳 #StreetFood #Shorts",
+                    "channel": "Foodie India",
+                    "duration": "0:45",
+                    "url": "https://www.youtube.com/shorts/60ItHLz5WEA",
+                    "thumb": "https://i.ytimg.com/vi/60ItHLz5WEA/hqdefault.jpg",
+                    "category": "viral",
+                },
+                {
+                    "title": "Insane Flute Performance in Public 🔥 #Music #Viral",
+                    "channel": "Flute Melodies",
+                    "duration": "0:52",
+                    "url": "https://www.youtube.com/shorts/AOeY-nDp7hI",
+                    "thumb": "https://i.ytimg.com/vi/AOeY-nDp7hI/hqdefault.jpg",
+                    "category": "music",
+                },
+                {
+                    "title": "Fastest Dance Moves You Never Seen 🕺 #Dance #Trending",
+                    "channel": "Dance Craze",
+                    "duration": "0:32",
+                    "url": "https://www.youtube.com/shorts/JGwWNGJdvx8",
+                    "thumb": "https://i.ytimg.com/vi/JGwWNGJdvx8/hqdefault.jpg",
+                    "category": "dance",
+                },
+                {
+                    "title": "3 Incredible Smartphone Camera Tricks 📸 #Tech #Shorts",
+                    "channel": "Gadget Hacks",
+                    "duration": "0:58",
+                    "url": "https://www.youtube.com/shorts/_uQrJ0TkZlc",
+                    "thumb": "https://i.ytimg.com/vi/_uQrJ0TkZlc/hqdefault.jpg",
+                    "category": "tech",
+                },
+                {
+                    "title": "Mind-Blowing Science Experiment at Home ⚡ #Science #Shorts",
+                    "channel": "Science Lab",
+                    "duration": "0:41",
+                    "url": "https://www.youtube.com/shorts/aircAruvnKk",
+                    "thumb": "https://i.ytimg.com/vi/aircAruvnKk/hqdefault.jpg",
+                    "category": "viral",
+                },
+            ]
+
+            selected = [r for r in all_reels if category == "trending" or r["category"] == category]
+            if not selected:
+                selected = all_reels
+
+            for item in selected:
+                self.add_reel_card(item)
+
+        def add_reel_card(self, reel_item: Dict[str, Any]):
+            card = StyledCard(
+                orientation="vertical",
+                padding=[dp(12), dp(10)],
+                spacing=dp(8),
+                size_hint_y=None,
+                height=dp(305),
+                bg_color=(0.09, 0.10, 0.16, 1.0),
+                radius=14,
+            )
+
+            # 1. Creator Info Row
+            top_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(26))
+            chan_name = safe_display_text(reel_item.get("channel", "Creator"))
+            chan_lbl = Label(
+                text=f"[color=#FF4081]●[/color] [b]{chan_name[:24]}[/b]",
+                markup=True,
+                font_size="12sp",
+                color=(1.0, 1.0, 1.0, 1.0),
+                halign="left",
+                valign="middle",
+                size_hint_x=1.0,
+            )
+            chan_lbl.bind(size=chan_lbl.setter("text_size"))
+            top_row.add_widget(chan_lbl)
+
+            tag_badge = Label(
+                text="[b]#SHORTS[/b]",
+                markup=True,
+                font_size="10sp",
+                color=(1.0, 0.40, 0.65, 1.0),
+                size_hint=(None, None),
+                size=(dp(60), dp(22)),
+            )
+            top_row.add_widget(tag_badge)
+            card.add_widget(top_row)
+
+            # 2. Thumbnail Preview with Tap to Play In-App
+            thumb_box = BoxLayout(
+                orientation="vertical",
+                size_hint_y=None,
+                height=dp(165),
+            )
+            thumb_url = reel_item.get("thumb") or ""
+            thumb_img = AsyncImage(
+                source=thumb_url,
+                size_hint=(1.0, 1.0),
+                allow_stretch=True,
+                keep_ratio=True,
+            )
+            def on_rthumb_err(instance, *args):
+                for cand in ("icon.png", "assets/logo.png"):
+                    if os.path.exists(cand):
+                        instance.source = cand
+                        break
+                instance.opacity = 0.7
+            thumb_img.bind(on_error=on_rthumb_err)
+            thumb_box.add_widget(thumb_img)
+
+            clean_title = safe_display_text(reel_item.get("title", "Viral Reel"))
+            def on_thumb_tap(instance, touch):
+                if instance.collide_point(*touch.pos):
+                    play_online_video(reel_item.get("url", ""), title=clean_title)
+                    return True
+                return False
+            thumb_box.bind(on_touch_down=on_thumb_tap)
+            card.add_widget(thumb_box)
+
+            # 3. Reel Title & Hashtags
+            title_lbl = Label(
+                text=f"[b]{clean_title[:65]}[/b]",
+                markup=True,
+                font_size="12sp",
+                color=(0.95, 0.95, 1.0, 1.0),
+                halign="left",
+                valign="top",
+                size_hint_y=None,
+                height=dp(30),
+            )
+            title_lbl.bind(size=title_lbl.setter("text_size"))
+            card.add_widget(title_lbl)
+
+            # 4. Action Buttons: [▶ WATCH] [⬇ GET] [🎧 AUDIO]
+            btn_row = BoxLayout(orientation="horizontal", spacing=dp(6), size_hint_y=None, height=dp(36))
+
+            watch_btn = IconActionButton(
+                icon_path="play.png",
+                text="WATCH",
+                font_size="11sp",
+                bg_color=(0.14, 0.50, 0.90, 1.0),
+                text_color=(1, 1, 1, 1),
+                size_hint_x=0.35,
+            )
+            watch_btn.bind(on_press=lambda ins, it=reel_item, t=clean_title: play_online_video(it.get("url", ""), title=t))
+            btn_row.add_widget(watch_btn)
+
+            dl_btn = IconActionButton(
+                icon_path="download_arrow.png",
+                text="GET",
+                font_size="11sp",
+                bg_color=(1.0, 0.68, 0.0, 1.0),
+                text_color=(0.04, 0.05, 0.08, 1.0),
+                size_hint_x=0.35,
+            )
+            dl_btn.bind(on_press=lambda ins, it=reel_item: self.open_download_modal(it))
+            btn_row.add_widget(dl_btn)
+
+            audio_btn = IconActionButton(
+                icon_path="play.png",
+                text="AUDIO",
+                font_size="11sp",
+                bg_color=(0.45, 0.20, 0.65, 1.0),
+                text_color=(1, 1, 1, 1),
+                size_hint_x=0.30,
+            )
+            audio_btn.bind(on_press=lambda ins, it=reel_item: self.play_audio_in_background(it))
+            btn_row.add_widget(audio_btn)
+
+            card.add_widget(btn_row)
+            self.reels_feed_container.add_widget(card)
+
+        def play_audio_in_background(self, media_item: Optional[Dict[str, Any]] = None):
+            """Play video's audio track in background using mini player engine with screen-off support."""
+            if not media_item:
+                return
+            url = media_item.get("url")
+            raw_title = media_item.get("title", "Audio Stream")
+            title = safe_display_text(raw_title)
+            self.update_status(f"Buffering background audio: {title[:25]}...", 20)
+
+            # Show mini player bar immediately
+            self.mini_player_bar.height = dp(56)
+            self.mini_player_bar.opacity = 1.0
+            self.mini_player_bar.disabled = False
+            self.mini_player_title.text = f"[b]🎧 {title[:28]}[/b]"
+            self.mini_player_time.text = "Starting audio playback..."
+            self.mini_player_play_btn.text = "⏸"
+
+            def worker():
+                try:
+                    import yt_dlp
+                    ydl_opts = {
+                        "format": "140/bestaudio[ext=m4a]/bestaudio/18/best",
+                        "quiet": True,
+                        "no_warnings": True,
+                    }
+                    stream_url = None
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                        stream_url = info.get("url")
+                        if not stream_url and "formats" in info:
+                            for f in info["formats"]:
+                                if f.get("acodec") != "none":
+                                    stream_url = f.get("url")
+                                    break
+
+                    if stream_url:
+                        def start_stream(dt):
+                            if self.current_sound:
+                                try:
+                                    self.current_sound.stop()
+                                    self.current_sound.unload()
+                                except Exception:
+                                    pass
+                                self.current_sound = None
+
+                            try:
+                                self.current_sound = SoundLoader.load(stream_url)
+                            except Exception as le:
+                                print(f"[SoundLoader] Stream notice: {le}")
+                                self.current_sound = None
+
+                            if self.current_sound:
+                                self.is_audio_playing = True
+                                self.current_sound.play()
+                                if not self.player_clock_event:
+                                    self.player_clock_event = Clock.schedule_interval(self._update_player_progress, 0.4)
+                                self.update_status("[color=#00E676]🎧 Background audio active![/color]", 100)
+                            else:
+                                play_online_video(url, title=title)
+
+                        Clock.schedule_once(start_stream)
+                    else:
+                        Clock.schedule_once(lambda dt: play_online_video(url, title=title))
+                except Exception as ex:
+                    print(f"[BackgroundAudio] Notice: {ex}")
+                    Clock.schedule_once(lambda dt: play_online_video(url, title=title))
+
+            threading.Thread(target=worker, daemon=True).start()
+
 
         # -----------------------------------------------------------------
         # Videos Search & Recommendation Helpers
@@ -2558,8 +3211,12 @@ if KIVY_AVAILABLE:
                 else:
                     btn.background_color = (0.13, 0.16, 0.23, 1.0)
                     btn.color = (0.75, 0.80, 0.90, 1.0)
-            self.url_input.text = cat_query
-            self.search_youtube_home(cat_query, section_title=f"{cat_name} Picks")
+            if hasattr(self, "url_input"):
+                self.url_input.hint_text = f"Browsing {cat_name}... Paste link or search"
+            if cat_name in ("🔥 ALL", "TRENDING"):
+                self.populate_home_recommendations()
+            else:
+                self.search_youtube_home(cat_query, section_title=f"{cat_name} Feed")
 
         def search_youtube_home(self, query: str, section_title: Optional[str] = None):
             """Search YouTube and display cards directly on Home page."""
@@ -2730,7 +3387,7 @@ if KIVY_AVAILABLE:
             if not media_item:
                 return
 
-            modal = ModalView(size_hint=(0.94, None), height=dp(420), auto_dismiss=True)
+            modal = ModalView(size_hint=(0.94, None), height=dp(465), auto_dismiss=True)
             content = StyledCard(
                 orientation="vertical",
                 padding=[dp(14), dp(12)],
@@ -2747,7 +3404,7 @@ if KIVY_AVAILABLE:
                     Image(source=play_icon_path, size_hint=(None, None), size=(dp(22), dp(22)), allow_stretch=True, keep_ratio=True)
                 )
             player_title = Label(
-                text="[b]YouTube Video Player[/b]",
+                text="[b]In-App Video Player[/b]",
                 markup=True,
                 font_size="14sp",
                 color=(1.0, 0.75, 0.0, 1.0),
@@ -2771,7 +3428,11 @@ if KIVY_AVAILABLE:
             header_row.add_widget(close_x)
             content.add_widget(header_row)
 
-            # Thumbnail & Player Display Box (Tap to play)
+            # Video Title & Details
+            raw_title = media_item.get("title") or "YouTube Video"
+            clean_title = safe_display_text(raw_title)
+
+            # Thumbnail & Player Display Box (Tap to play directly in-app)
             player_box = BoxLayout(
                 orientation="vertical",
                 size_hint_y=None,
@@ -2792,11 +3453,16 @@ if KIVY_AVAILABLE:
                 instance.opacity = 0.7
             thumb_img.bind(on_error=on_pthumb_error)
             player_box.add_widget(thumb_img)
+
+            # Tap thumbnail to immediately launch in-app player
+            def on_thumb_click(instance, touch):
+                if instance.collide_point(*touch.pos):
+                    play_online_video(media_item.get("url", ""), title=clean_title)
+                    return True
+                return False
+            player_box.bind(on_touch_down=on_thumb_click)
             content.add_widget(player_box)
 
-            # Video Title & Details
-            raw_title = media_item.get("title") or "YouTube Video"
-            clean_title = safe_display_text(raw_title)
             t_lbl = Label(
                 text=f"[b]{clean_title[:65]}[/b]",
                 markup=True,
@@ -2824,20 +3490,35 @@ if KIVY_AVAILABLE:
             meta_lbl.bind(size=meta_lbl.setter("text_size"))
             content.add_widget(meta_lbl)
 
-            # Player Action Buttons: [▶ WATCH IN YOUTUBE APP] + [⬇ DOWNLOAD]
-            btn_col = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None, height=dp(88))
+            # Player Action Buttons: [▶ PLAY NOW] + [🎧 PLAY IN BACKGROUND (SCREEN-OFF MODE)] + [⬇ DOWNLOAD / CLOSE]
+            btn_col = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None, height=dp(130))
 
-            watch_btn = IconActionButton(
+            play_inapp_btn = IconActionButton(
                 icon_path="play.png",
-                text="WATCH IN YOUTUBE (FULL QUALITY)",
-                bg_color=(0.85, 0.15, 0.15, 1.0),
+                text="▶ PLAY NOW (IN-APP PLAYER)",
+                bg_color=(0.12, 0.55, 0.95, 1.0),
                 text_color=(1, 1, 1, 1),
                 font_size="12sp",
                 size_hint_y=None,
-                height=dp(40),
+                height=dp(38),
             )
-            watch_btn.bind(on_press=lambda ins, u=media_item["url"]: play_online_video(u))
-            btn_col.add_widget(watch_btn)
+            play_inapp_btn.bind(on_press=lambda ins, u=media_item["url"], t=clean_title: play_online_video(u, title=t))
+            btn_col.add_widget(play_inapp_btn)
+
+            bg_audio_btn = IconActionButton(
+                icon_path="music.png",
+                text="🎧 PLAY IN BACKGROUND (SCREEN-OFF MODE)",
+                bg_color=(0.16, 0.65, 0.38, 1.0),
+                text_color=(1, 1, 1, 1),
+                font_size="11sp",
+                size_hint_y=None,
+                height=dp(38),
+            )
+            def on_bg_audio_click(ins):
+                modal.dismiss()
+                self.play_audio_in_background(media_item)
+            bg_audio_btn.bind(on_press=on_bg_audio_click)
+            btn_col.add_widget(bg_audio_btn)
 
             dl_action_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(38))
             dl_opts_btn = IconActionButton(
@@ -3911,7 +4592,7 @@ if KIVY_AVAILABLE:
                     self.play_next_audio()
 
         def check_for_updates(self, user_triggered: bool = True):
-            """Query GitHub Releases API for new updates and display modal if newer version found (Feature 6)."""
+            """Query GitHub Releases API for new updates and display modal if newer version found."""
             if user_triggered:
                 self.update_status("Checking GitHub for app updates...", 25)
 
@@ -3930,20 +4611,7 @@ if KIVY_AVAILABLE:
                             tag = data.get("tag_name", "").lstrip("v")
                             curr_ver = get_app_version()
 
-                            tag_nums = [int(x) for x in re.findall(r"\d+", tag)]
-                            curr_nums = [int(x) for x in re.findall(r"\d+", curr_ver)]
-
-                            is_newer = False
-                            for r, c in zip(tag_nums, curr_nums):
-                                if r > c:
-                                    is_newer = True
-                                    break
-                                elif r < c:
-                                    break
-                            if not is_newer and len(tag_nums) > len(curr_nums) and tag_nums[:len(curr_nums)] == curr_nums:
-                                is_newer = True
-
-                            if is_newer:
+                            if is_version_newer(curr_ver, tag):
                                 release_name = data.get("name") or f"MSK YTDL v{tag}"
                                 body = data.get("body") or "New release with performance enhancements and bug fixes."
                                 html_url = data.get("html_url") or "https://github.com/msk-ytdl/msk-ytdl/releases"
@@ -3953,7 +4621,7 @@ if KIVY_AVAILABLE:
                                         apk_url = asset.get("browser_download_url")
                                         break
                                 Clock.schedule_once(
-                                    lambda dt: self.open_update_modal(tag, release_name, body, apk_url or html_url)
+                                    lambda dt: self.open_update_modal(tag, release_name, body, html_url, apk_url=apk_url)
                                 )
                                 Clock.schedule_once(
                                     lambda dt: self.update_status(f"[color=#00E676]New Update Available:[/color] v{tag}", 100)
@@ -3972,13 +4640,20 @@ if KIVY_AVAILABLE:
 
             threading.Thread(target=worker, daemon=True).start()
 
-        def open_update_modal(self, new_version: str, release_title: str, changelog: str, download_url: str):
-            """Open dedicated in-app modal announcing available GitHub release with changelog and 1-tap download."""
-            modal = ModalView(size_hint=(0.92, 0.72), auto_dismiss=True)
+        def open_update_modal(
+            self,
+            new_version: str,
+            release_title: str,
+            changelog: str,
+            download_url: str,
+            apk_url: Optional[str] = None,
+        ):
+            """Open in-app Auto-Updater modal with progress bar and 1-tap direct APK download & install."""
+            modal = ModalView(size_hint=(0.94, 0.78), auto_dismiss=True)
             content = StyledCard(
                 orientation="vertical",
                 padding=[dp(16), dp(14)],
-                spacing=dp(10),
+                spacing=dp(8),
                 bg_color=(0.08, 0.10, 0.16, 0.98),
                 radius=16,
             )
@@ -4058,38 +4733,145 @@ if KIVY_AVAILABLE:
                 valign="top",
             )
             ch_lbl.bind(width=lambda ins, w: setattr(ins, "text_size", (w, None)))
-            ch_lbl.bind(texture_size=lambda ins, ts: setattr(ins, "height", max(dp(60), ts[1] + dp(10))))
+            ch_lbl.bind(texture_size=lambda ins, ts: setattr(ins, "height", max(dp(50), ts[1] + dp(10))))
             ch_scroll.add_widget(ch_lbl)
             content.add_widget(ch_scroll)
 
-            # Action Buttons: [⬇ DOWNLOAD UPDATE] and [✕ LATER]
-            btn_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(42))
-            dl_update_btn = IconActionButton(
+            # In-App Auto-Update Download Progress Box
+            up_progress_box = BoxLayout(orientation="vertical", spacing=dp(3), size_hint_y=None, height=dp(28))
+            up_progress_bar = ProgressBar(max=100, value=0, size_hint_y=None, height=dp(6))
+            up_status_lbl = Label(
+                text="Tap below to auto-download and install update.",
+                font_size="10.5sp",
+                color=(0.75, 0.85, 0.95, 1.0),
+                size_hint_y=None,
+                height=dp(18),
+                halign="center",
+            )
+            up_status_lbl.bind(size=up_status_lbl.setter("text_size"))
+            up_progress_box.add_widget(up_progress_bar)
+            up_progress_box.add_widget(up_status_lbl)
+            content.add_widget(up_progress_box)
+
+            # Action Buttons Row
+            btn_col = BoxLayout(orientation="vertical", spacing=dp(6), size_hint_y=None, height=dp(86))
+
+            target_apk_url = apk_url or (download_url if download_url.endswith(".apk") else None)
+            download_state = {"downloaded_file": None, "is_downloading": False}
+
+            auto_dl_btn = IconActionButton(
                 icon_path="download_arrow.png",
-                text="DOWNLOAD UPDATE",
+                text="⚡ AUTO-DOWNLOAD & INSTALL NOW" if target_apk_url else "⬇ DOWNLOAD UPDATE (BROWSER)",
                 bg_color=(1.0, 0.68, 0.0, 1.0),
                 text_color=(0.04, 0.05, 0.08, 1.0),
                 font_size="11.5sp",
-                size_hint_x=0.7,
+                size_hint_y=None,
+                height=dp(40),
             )
-            def on_dl_update(ins):
-                modal.dismiss()
-                play_online_video(download_url)
-            dl_update_btn.bind(on_press=on_dl_update)
-            btn_row.add_widget(dl_update_btn)
+
+            def start_auto_update_download(ins):
+                if download_state.get("downloaded_file") and Path(download_state["downloaded_file"]).exists():
+                    up_status_lbl.text = "[color=#00E676]Launching Package Installer...[/color]"
+                    install_apk_file(download_state["downloaded_file"])
+                    return
+
+                if not target_apk_url:
+                    modal.dismiss()
+                    open_web_url(download_url)
+                    return
+
+                if download_state.get("is_downloading"):
+                    return
+
+                download_state["is_downloading"] = True
+                auto_dl_btn.disabled = True
+                up_status_lbl.text = f"Connecting to GitHub for v{new_version}..."
+
+                def download_worker():
+                    try:
+                        import urllib.request
+                        dest_dir = get_android_download_dir()
+                        apk_dest = dest_dir / f"MSK_YTDL_v{new_version}.apk"
+
+                        req = urllib.request.Request(
+                            target_apk_url,
+                            headers={"User-Agent": "MSK-YTDL-App", "Accept": "*/*"}
+                        )
+                        with urllib.request.urlopen(req, timeout=30) as response:
+                            total_bytes = int(response.headers.get("Content-Length", 0))
+                            downloaded = 0
+                            block_size = 65536
+                            with open(apk_dest, "wb") as f_out:
+                                while True:
+                                    chunk = response.read(block_size)
+                                    if not chunk:
+                                        break
+                                    f_out.write(chunk)
+                                    downloaded += len(chunk)
+                                    if total_bytes > 0:
+                                        pct = (downloaded / total_bytes) * 100
+                                        mb_curr = downloaded / (1024 * 1024)
+                                        mb_tot = total_bytes / (1024 * 1024)
+                                        def update_ui(p=pct, c=mb_curr, t=mb_tot):
+                                            up_progress_bar.value = p
+                                            up_status_lbl.text = f"Downloading update: {p:.0f}% ({c:.1f}/{t:.1f} MB)"
+                                        Clock.schedule_once(lambda dt: update_ui())
+
+                        download_state["downloaded_file"] = str(apk_dest)
+                        download_state["is_downloading"] = False
+
+                        def on_success():
+                            up_progress_bar.value = 100
+                            up_status_lbl.text = "[color=#00E676]✓ Download Complete! Launching Installer...[/color]"
+                            auto_dl_btn.disabled = False
+                            auto_dl_btn.text = "🚀 TAP TO INSTALL NOW"
+                            auto_dl_btn.bg_color = (0.10, 0.65, 0.30, 1.0)
+                            auto_dl_btn.text_color = (1, 1, 1, 1)
+                            install_apk_file(apk_dest)
+                            self.update_status(f"[color=#00E676]Update v{new_version} ready to install![/color]", 100)
+
+                        Clock.schedule_once(lambda dt: on_success())
+
+                    except Exception as err:
+                        print(f"[AutoUpdate] Download error: {err}")
+                        download_state["is_downloading"] = False
+                        def on_fail():
+                            auto_dl_btn.disabled = False
+                            auto_dl_btn.text = "🌐 OPEN GITHUB RELEASE (FALLBACK)"
+                            up_status_lbl.text = "[color=#FF5252]Download failed. Tap to open in browser.[/color]"
+                            auto_dl_btn.bind(on_press=lambda i: open_web_url(download_url))
+                        Clock.schedule_once(lambda dt: on_fail())
+
+                threading.Thread(target=download_worker, daemon=True).start()
+
+            auto_dl_btn.bind(on_press=start_auto_update_download)
+            btn_col.add_widget(auto_dl_btn)
+
+            sub_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(36))
+            github_btn = IconActionButton(
+                icon_path="settings.png",
+                text="GITHUB RELEASES",
+                bg_color=(0.14, 0.18, 0.28, 1.0),
+                text_color=(0.80, 0.88, 1.0, 1.0),
+                font_size="11sp",
+                size_hint_x=0.6,
+            )
+            github_btn.bind(on_press=lambda ins: open_web_url(download_url))
+            sub_row.add_widget(github_btn)
 
             later_btn = IconActionButton(
                 icon_path="clear.png",
                 text="LATER",
                 bg_color=(0.18, 0.20, 0.28, 1.0),
                 text_color=(0.80, 0.85, 0.95, 1.0),
-                font_size="11.5sp",
-                size_hint_x=0.3,
+                font_size="11sp",
+                size_hint_x=0.4,
             )
             later_btn.bind(on_press=modal.dismiss)
-            btn_row.add_widget(later_btn)
-            content.add_widget(btn_row)
+            sub_row.add_widget(later_btn)
+            btn_col.add_widget(sub_row)
 
+            content.add_widget(btn_col)
             modal.add_widget(content)
             modal.open()
 
@@ -4196,9 +4978,9 @@ if KIVY_AVAILABLE:
                     safe_logger = AndroidYTDLLogger()
 
                     base_ydl_opts = {
-                        "restrictfilenames": True,
                         "windowsfilenames": True,
-                        "trim_file_name": 45,
+                        "trim_file_name": 140,
+                        "paths": {"home": str(target_dir), "temp": str(target_dir)},
                         "progress_hooks": [progress_hook],
                         "logger": safe_logger,
                         "socket_timeout": 35,
@@ -4230,7 +5012,7 @@ if KIVY_AVAILABLE:
                                     "preferredquality": "320" if "320" in selected_format else "192",
                                 }]
                             else:
-                                base_ydl_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio/18/best"
+                                base_ydl_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio/best"
                         else:
                             base_ydl_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio/best"
                     else:
@@ -4324,9 +5106,9 @@ if KIVY_AVAILABLE:
 
                         item_opts = dict(base_ydl_opts)
                         if total_count > 1:
-                            item_opts["outtmpl"] = str(target_dir / f"[{idx:02d}] %(title).35s [%(id)s].%(ext)s")
+                            item_opts["outtmpl"] = str(target_dir / f"[{idx:02d}] %(title)s.%(ext)s")
                         else:
-                            item_opts["outtmpl"] = str(target_dir / "%(title).40s [%(id)s].%(ext)s")
+                            item_opts["outtmpl"] = str(target_dir / "%(title)s.%(ext)s")
 
                         try:
                             with yt_dlp.YoutubeDL(item_opts) as ydl:
@@ -4336,9 +5118,9 @@ if KIVY_AVAILABLE:
                         except Exception as dl_err:
                             err_str = str(dl_err)
                             if "File name too long" in err_str or "Errno 36" in err_str:
-                                print(f"[Download] Retrying with short ID filename due to: {err_str}")
+                                print(f"[Download] Retrying with clean short filename due to: {err_str}")
                                 fallback_opts = dict(item_opts)
-                                fallback_opts["outtmpl"] = str(target_dir / "%(id)s.%(ext)s")
+                                fallback_opts["outtmpl"] = str(target_dir / "%(title).60s.%(ext)s")
                                 with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
                                     info = ydl_fb.extract_info(item_url, download=True)
                             elif total_count > 1:
@@ -4359,19 +5141,19 @@ if KIVY_AVAILABLE:
                         saved_path: Optional[Path] = None
                         if "requested_downloads" in info and info["requested_downloads"]:
                             fp = info["requested_downloads"][0].get("filepath")
-                            if fp and Path(fp).exists():
+                            if fp and Path(fp).is_file():
                                 saved_path = Path(fp)
 
                         if not saved_path:
                             try:
                                 prepared = ydl.prepare_filename(info)
-                                if Path(prepared).exists():
+                                if Path(prepared).is_file():
                                     saved_path = Path(prepared)
                             except Exception:
                                 pass
 
                         if not saved_path and item_id:
-                            candidates = list(target_dir.glob(f"*{item_id}*"))
+                            candidates = [c for c in target_dir.glob(f"*{item_id}*") if c.is_file()]
                             if candidates:
                                 saved_path = candidates[0]
 
@@ -4380,7 +5162,7 @@ if KIVY_AVAILABLE:
                             for p in target_dir.glob("*videoplayback*"):
                                 if p.is_file():
                                     ext = p.suffix or (".mp4" if not is_audio else ".m4a")
-                                    fixed_name = f"[{idx:02d}] {clean_title} [{item_id}]{ext}" if total_count > 1 else f"{clean_title} [{item_id}]{ext}"
+                                    fixed_name = f"[{idx:02d}] {clean_title}{ext}" if total_count > 1 else f"{clean_title}{ext}"
                                     renamed_file = target_dir / fixed_name
                                     try:
                                         if not renamed_file.exists():
