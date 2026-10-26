@@ -62,6 +62,7 @@ except ImportError:
 try:
     from kivy.app import App
     from kivy.clock import Clock, mainthread
+    from kivy.core.audio import SoundLoader
     from kivy.core.clipboard import Clipboard
     from kivy.core.text import LabelBase
     from kivy.core.window import Window
@@ -82,6 +83,11 @@ except ImportError:
     KIVY_AVAILABLE = False
 
 
+class DownloadCancelledException(Exception):
+    """Raised when user cancels an active download via UI."""
+    pass
+
+
 class AndroidYTDLLogger:
     """Safe custom logger for yt-dlp that routes messages without calling standard error streams."""
     def debug(self, msg):
@@ -100,26 +106,40 @@ class AndroidYTDLLogger:
             pass
 
 
-def normalize_youtube_url(text: str) -> Optional[str]:
+def detect_media_platform(url: str) -> str:
+    """Identify target social media or video platform from URL."""
+    if not url or not isinstance(url, str):
+        return "Unknown"
+    low = url.lower()
+    if "youtube.com" in low or "youtu.be" in low:
+        return "YouTube"
+    if "instagram.com" in low or "instagr.am" in low:
+        return "Instagram"
+    if "facebook.com" in low or "fb.watch" in low or "fb.com" in low:
+        return "Facebook"
+    if "tiktok.com" in low:
+        return "TikTok"
+    if "twitter.com" in low or "x.com" in low or "t.co" in low:
+        return "Twitter / X"
+    if "pinterest.com" in low or "pin.it" in low:
+        return "Pinterest"
+    if "reddit.com" in low or "redd.it" in low:
+        return "Reddit"
+    if low.startswith("http://") or low.startswith("https://"):
+        return "Web Media"
+    return "Unknown"
+
+
+def normalize_media_url(text: str) -> Optional[str]:
     """
-    Robustly extract and canonicalize any YouTube link, playlist, query fragment, or video ID.
-    Handles:
-      - 'https://www.youtube.com/playlist?list=PL...'
-      - 'https://www.youtube.com/watch?v=UQyh7QIVaDU&list=PL...'
-      - 'https://youtu.be/UQyh7QIVaDU?list=PL...'
-      - 'v=UQyh7QIVaDU&si=...'
-      - 'watch?v=UQyh7QIVaDU'
-      - 'UQyh7QIVaDU' (raw 11-char ID)
-      - 'https://youtu.be/UQyh7QIVaDU?si=...'
-      - 'https://www.youtube.com/watch?v=UQyh7QIVaDU'
-      - 'https://www.youtube.com/shorts/UQyh7QIVaDU'
-      - Text containing links shared from YouTube app
+    Robustly extract and canonicalize media links across multiple platforms:
+    YouTube, Instagram (Reels & Posts), Facebook, TikTok, Twitter/X, and web video links.
     """
     if not text:
         return None
     raw = text.strip()
 
-    # 1. Direct playlist URL: youtube.com/playlist?list=...
+    # 1. Direct YouTube playlist URL: youtube.com/playlist?list=...
     match_plist = re.search(
         r"https?://(?:www\.|m\.)?youtube\.com/playlist\?list=([a-zA-Z0-9_-]+)",
         raw,
@@ -132,19 +152,18 @@ def normalize_youtube_url(text: str) -> Optional[str]:
     plist_id = match_list_param.group(1) if match_list_param else None
 
     # 3. Full YouTube watch, youtu.be, shorts, live, or embed URL with video ID
-    match_full = re.search(
+    match_yt = re.search(
         r"https?://(?:www\.|m\.)?(?:youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})|youtu\.be/([a-zA-Z0-9_-]{11})|youtube\.com/shorts/([a-zA-Z0-9_-]{11})|youtube\.com/live/([a-zA-Z0-9_-]{11})|youtube\.com/embed/([a-zA-Z0-9_-]{11}))",
         raw,
     )
-    if match_full:
+    if match_yt:
         vid = (
-            match_full.group(1)
-            or match_full.group(2)
-            or match_full.group(3)
-            or match_full.group(4)
-            or match_full.group(5)
+            match_yt.group(1)
+            or match_yt.group(2)
+            or match_yt.group(3)
+            or match_yt.group(4)
+            or match_yt.group(5)
         )
-        # If it belongs to a true user/channel playlist (not radio mix RD... or top list TL...), treat as playlist
         if plist_id and not plist_id.startswith("RD") and not plist_id.startswith("TL"):
             return f"https://www.youtube.com/playlist?list={plist_id}"
         return f"https://www.youtube.com/watch?v={vid}"
@@ -158,12 +177,35 @@ def normalize_youtube_url(text: str) -> Optional[str]:
     if match_query:
         return f"https://www.youtube.com/watch?v={match_query.group(1)}"
 
-    # 6. Raw 11-character video ID alone (e.g. 'UQyh7QIVaDU')
+    # 6. Raw 11-character YouTube video ID alone (e.g. 'UQyh7QIVaDU')
     match_raw_id = re.match(r"^[a-zA-Z0-9_-]{11}$", raw)
     if match_raw_id:
         return f"https://www.youtube.com/watch?v={raw}"
 
-    # 7. General web link fallback
+    # 7. Instagram Reels & Posts
+    match_ig = re.search(r"https?://(?:www\.)?instagram\.com/(?:reel|reels|p|tv)/([a-zA-Z0-9_-]+)", raw)
+    if match_ig:
+        sub_type = "reel" if "/reel" in raw else ("p" if "/p/" in raw else "tv")
+        return f"https://www.instagram.com/{sub_type}/{match_ig.group(1)}/"
+
+    # 8. TikTok (Video & VM/VT shortlinks)
+    match_tt = re.search(r"https?://(?:(?:www|vm|vt)\.)?tiktok\.com/(?:@[a-zA-Z0-9_.-]+/video/(\d+)|([a-zA-Z0-9_-]+))", raw)
+    if match_tt:
+        m_full = re.search(r"(https?://[^\s]+)", raw)
+        return m_full.group(1).split("?")[0] if m_full else raw
+
+    # 9. Facebook Videos & Reels (including fb.watch)
+    match_fb = re.search(r"https?://(?:www\.|m\.)?(?:facebook\.com|fb\.watch)/[^\s]+", raw)
+    if match_fb:
+        clean_fb = match_fb.group(0)
+        return clean_fb if "watch" in clean_fb else clean_fb.split("?")[0]
+
+    # 10. Twitter / X Posts & Videos
+    match_tw = re.search(r"https?://(?:www\.)?(?:twitter\.com|x\.com)/[a-zA-Z0-9_]+/status/(\d+)", raw)
+    if match_tw:
+        return f"https://x.com/i/status/{match_tw.group(1)}"
+
+    # 11. General web link fallback
     match_gen = re.search(r"(https?://[^\s]+)", raw)
     if match_gen:
         return match_gen.group(1)
@@ -171,9 +213,14 @@ def normalize_youtube_url(text: str) -> Optional[str]:
     return None
 
 
+def normalize_youtube_url(text: str) -> Optional[str]:
+    """Compatibility alias for normalize_media_url."""
+    return normalize_media_url(text)
+
+
 def extract_youtube_url(text: str) -> Optional[str]:
-    """Compatibility alias for normalize_youtube_url."""
-    return normalize_youtube_url(text)
+    """Compatibility alias for normalize_media_url."""
+    return normalize_media_url(text)
 
 
 def sanitize_storage_filename(title: Optional[str], default_name: str = "MSK_Video") -> str:
@@ -191,9 +238,12 @@ def sanitize_storage_filename(title: Optional[str], default_name: str = "MSK_Vid
 
 def get_canonical_video_url(item: Dict[str, Any], fallback_url: str = "") -> str:
     """
-    Ensure yt-dlp receives a canonical watch URL (with 11-char ID)
-    so it invokes the proper YouTube extractor and never downloads as 'videoplayback.mp4'.
+    Ensure yt-dlp receives a canonical watch URL for YouTube or original clean URL for other platforms.
     """
+    target_plat = detect_media_platform(fallback_url or item.get("webpage_url", ""))
+    if target_plat != "YouTube":
+        return item.get("webpage_url") or item.get("url") or fallback_url
+
     vid_id = item.get("id")
     if vid_id and len(str(vid_id)) == 11 and re.match(r"^[a-zA-Z0-9_-]{11}$", str(vid_id)):
         return f"https://www.youtube.com/watch?v={vid_id}"
@@ -764,6 +814,15 @@ if KIVY_AVAILABLE:
         def set_bg_color(self, rgba):
             self._col_instr.rgba = rgba
 
+        @property
+        def text(self):
+            return self.label.text if hasattr(self, "label") and self.label else ""
+
+        @text.setter
+        def text(self, val):
+            if hasattr(self, "label") and self.label:
+                self.label.text = str(val)
+
 
     class NavTabItem(ButtonBehavior, BoxLayout):
         """Bottom navigation tab item with crisp icon and bold title."""
@@ -1027,7 +1086,116 @@ if KIVY_AVAILABLE:
                 self.on_select_cb(self.key)
 
 
+    class PlaylistItemRow(ButtonBehavior, BoxLayout):
+        """Interactive row widget representing an individual video entry in a playlist with a checkbox toggle."""
+        def __init__(self, index: int, title: str, duration: str = "", is_checked: bool = True, on_toggle_cb=None, **kwargs):
+            super().__init__(**kwargs)
+            self.orientation = "horizontal"
+            self.spacing = dp(8)
+            self.padding = [dp(8), dp(4)]
+            self.size_hint_y = None
+            self.height = dp(42)
+            self.index = index
+            self.is_checked = is_checked
+            self.on_toggle_cb = on_toggle_cb
+
+            with self.canvas.before:
+                self._bg_col = Color(0.12, 0.15, 0.22, 1.0 if is_checked else 0.45)
+                self._rect = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(6)])
+            self.bind(pos=self._update_geom, size=self._update_geom)
+
+            # Checkbox label [✔] or [○]
+            self.check_lbl = Label(
+                text="[b][color=#00E676]✔[/color][/b]" if is_checked else "[color=#607D8B]○[/color]",
+                markup=True,
+                font_size="13sp",
+                size_hint=(None, None),
+                size=(dp(24), dp(24)),
+                pos_hint={"center_y": 0.5},
+            )
+            self.add_widget(self.check_lbl)
+
+            # Sequence Number
+            self.idx_lbl = Label(
+                text=f"#{index}",
+                font_size="10.5sp",
+                bold=True,
+                color=(0.50, 0.70, 0.95, 1.0),
+                size_hint=(None, None),
+                size=(dp(28), dp(24)),
+                pos_hint={"center_y": 0.5},
+            )
+            self.add_widget(self.idx_lbl)
+
+            # Clean Title
+            clean_t = safe_display_text(title)
+            if len(clean_t) > 36:
+                clean_t = clean_t[:33] + "..."
+            self.title_lbl = Label(
+                text=f"[b]{clean_t}[/b]",
+                markup=True,
+                font_size="11sp",
+                color=(0.95, 0.95, 1.0, 1.0 if is_checked else 0.50),
+                size_hint_x=1.0,
+                halign="left",
+                valign="middle",
+            )
+            self.title_lbl.bind(size=self.title_lbl.setter("text_size"))
+            self.add_widget(self.title_lbl)
+
+            # Duration badge
+            if duration:
+                self.dur_lbl = Label(
+                    text=duration,
+                    font_size="9.5sp",
+                    color=(0.40, 0.80, 1.0, 0.85),
+                    size_hint=(None, None),
+                    size=(dp(44), dp(24)),
+                    pos_hint={"center_y": 0.5},
+                )
+                self.add_widget(self.dur_lbl)
+
+            self.bind(on_press=self._on_row_pressed)
+
+        def _update_geom(self, *args):
+            self._rect.pos = self.pos
+            self._rect.size = self.size
+
+        def set_checked(self, checked: bool):
+            self.is_checked = checked
+            self.check_lbl.text = "[b][color=#00E676]✔[/color][/b]" if checked else "[color=#607D8B]○[/color]"
+            self._bg_col.rgba = (0.12, 0.15, 0.22, 1.0) if checked else (0.08, 0.10, 0.14, 0.45)
+            self.title_lbl.color = (0.95, 0.95, 1.0, 1.0 if checked else 0.50)
+
+        def _on_row_pressed(self, *args):
+            new_val = not self.is_checked
+            self.set_checked(new_val)
+            if self.on_toggle_cb:
+                self.on_toggle_cb(self.index - 1, new_val)
+
+
     class MSKDownloaderMobile(App):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.download_state = {
+                "is_active": False,
+                "cancel_requested": False,
+                "current_part_files": set(),
+            }
+            self.current_sound = None
+            self.current_track_path: Optional[Path] = None
+            self.is_audio_playing = False
+            self.audio_playlist: List[Path] = []
+            self.audio_index = 0
+            self.player_clock_event = None
+            self.selected_platform = "ALL"
+            self.current_preview_url = ""
+            self.current_preview_info: Optional[Dict[str, Any]] = None
+            self.last_clipboard_text = ""
+            self.last_notif_time = 0.0
+            self.active_tab = "home"
+            self.active_filter = "all"
+
         def build(self):
             self.title = "MSK YTDL"
             Window.clearcolor = (0.05, 0.06, 0.09, 1.0)  # Deep obsidian dark mode
@@ -1054,6 +1222,22 @@ if KIVY_AVAILABLE:
             self.last_notif_time = 0.0
             self.active_tab = "home"
             self.active_filter = "all"
+            self.selected_platform = "ALL"
+
+            # Download queue & active state tracking
+            self.download_state = {
+                "is_active": False,
+                "cancel_requested": False,
+                "current_part_files": set(),
+            }
+
+            # Floating Mini Music Player state
+            self.current_sound = None
+            self.current_track_path: Optional[Path] = None
+            self.is_audio_playing = False
+            self.audio_playlist: List[Path] = []
+            self.audio_index = 0
+            self.player_clock_event = None
 
             # Default quality spinner for preferences
             self.quality_spinner = Spinner(
@@ -1079,7 +1263,7 @@ if KIVY_AVAILABLE:
             except Exception:
                 pass
 
-            # Root vertical container: [Pinned Header] + [Dynamic Main View] + [Pinned Bottom Footer Nav]
+            # Root vertical container: [Pinned Header] + [Dynamic Main View] + [Floating Mini Player] + [Pinned Bottom Footer Nav]
             root = BoxLayout(orientation="vertical")
 
             # -------------------------------------------------------------
@@ -1103,6 +1287,12 @@ if KIVY_AVAILABLE:
             self.main_container.add_widget(self.home_view)
 
             # -------------------------------------------------------------
+            # Floating Mini Music Player Bar (Feature 3)
+            # -------------------------------------------------------------
+            self.mini_player_bar = self.create_mini_player_bar()
+            root.add_widget(self.mini_player_bar)
+
+            # -------------------------------------------------------------
             # Bottom Navigation Footer Bar (Home / Downloads / Videos)
             # -------------------------------------------------------------
             self.nav_footer = self.create_bottom_nav()
@@ -1113,6 +1303,9 @@ if KIVY_AVAILABLE:
             Clock.schedule_once(lambda dt: self.refresh_library(), 0.6)
             Clock.schedule_once(lambda dt: self.populate_home_recommendations(), 0.5)
             Clock.schedule_interval(self.check_clipboard, 2.5)
+
+            # Feature 6: Silent GitHub update check in background
+            Clock.schedule_once(lambda dt: self.check_for_updates(user_triggered=False), 5.0)
 
             return root
 
@@ -1317,6 +1510,35 @@ if KIVY_AVAILABLE:
             about_card.add_widget(about_lbl)
             body_layout.add_widget(about_card)
 
+            # Section 5: Software Updates (Feature 6)
+            update_card = StyledCard(orientation="vertical", padding=[dp(12), dp(10)], spacing=dp(6), size_hint_y=None, height=dp(86), bg_color=(0.11, 0.13, 0.20, 1.0))
+            up_lbl = Label(
+                text="[b]Software Updates[/b]\n[size=10.5sp][color=#90CAF9]Check GitHub releases for latest features & fixes[/color][/size]",
+                markup=True,
+                font_size="12sp",
+                halign="left",
+                size_hint_y=None,
+                height=dp(30),
+            )
+            up_lbl.bind(size=up_lbl.setter("text_size"))
+            update_card.add_widget(up_lbl)
+
+            chk_up_btn = IconActionButton(
+                icon_path="settings.png",
+                text="CHECK FOR UPDATES",
+                font_size="11.5sp",
+                size_hint_y=None,
+                height=dp(34),
+                bg_color=(0.20, 0.28, 0.44, 1.0),
+                text_color=(1, 1, 1, 1),
+            )
+            def on_chk_updates_pressed(ins):
+                modal.dismiss()
+                self.check_for_updates(user_triggered=True)
+            chk_up_btn.bind(on_press=on_chk_updates_pressed)
+            update_card.add_widget(chk_up_btn)
+            body_layout.add_widget(update_card)
+
             scroll_body.add_widget(body_layout)
             content.add_widget(scroll_body)
 
@@ -1412,6 +1634,38 @@ if KIVY_AVAILABLE:
             )
             self.clipboard_banner.bind(on_press=self.on_clipboard_banner_clicked)
             content.add_widget(self.clipboard_banner)
+
+            # Multi-Platform Quick Selector Bar (Feature 2)
+            plat_scroll = ScrollView(do_scroll_x=True, do_scroll_y=False, size_hint_y=None, height=dp(34))
+            plat_box = BoxLayout(orientation="horizontal", spacing=dp(6), size_hint_x=None)
+            plat_box.bind(minimum_width=plat_box.setter("width"))
+
+            self.platform_chips = {}
+            platforms = [
+                ("ALL", (1.0, 0.72, 0.0, 1.0)),
+                ("YOUTUBE", (0.85, 0.15, 0.15, 1.0)),
+                ("INSTAGRAM", (0.88, 0.18, 0.45, 1.0)),
+                ("FACEBOOK", (0.09, 0.47, 0.95, 1.0)),
+                ("TIKTOK", (0.00, 0.85, 0.85, 1.0)),
+                ("TWITTER / X", (0.35, 0.40, 0.50, 1.0)),
+            ]
+            for p_name, p_col in platforms:
+                is_active = (p_name == getattr(self, "selected_platform", "ALL"))
+                btn = Button(
+                    text=p_name,
+                    font_size="10.5sp",
+                    bold=True,
+                    size_hint=(None, None),
+                    size=(dp(92) if "/" in p_name else dp(78), dp(30)),
+                    background_color=p_col if is_active else (0.12, 0.15, 0.22, 1.0),
+                    color=(0.05, 0.07, 0.12, 1.0) if is_active else (0.75, 0.80, 0.90, 1.0),
+                )
+                btn.bind(on_press=lambda ins, name=p_name: self.on_platform_chip_clicked(name))
+                self.platform_chips[p_name] = btn
+                plat_box.add_widget(btn)
+
+            plat_scroll.add_widget(plat_box)
+            content.add_widget(plat_scroll)
 
             # Unified Input Card: Video/Playlist Link or Search Query
             input_card = StyledCard(
@@ -1563,7 +1817,7 @@ if KIVY_AVAILABLE:
             content.add_widget(self.preview_card)
 
             # Status & Progress Card
-            status_card = StyledCard(
+            self.status_card = StyledCard(
                 orientation="vertical",
                 padding=[dp(12), dp(10)],
                 spacing=dp(6),
@@ -1577,7 +1831,7 @@ if KIVY_AVAILABLE:
                 size_hint_y=None,
                 height=dp(8),
             )
-            status_card.add_widget(self.progress_bar)
+            self.status_card.add_widget(self.progress_bar)
 
             self.status_label = Label(
                 text="Ready. Paste video/playlist link or search above.",
@@ -1589,8 +1843,24 @@ if KIVY_AVAILABLE:
                 halign="center",
             )
             self.status_label.bind(size=self.status_label.setter("text_size"))
-            status_card.add_widget(self.status_label)
-            content.add_widget(status_card)
+            self.status_card.add_widget(self.status_label)
+
+            # Active Download Cancellation Button (Feature 4)
+            self.cancel_download_btn = IconActionButton(
+                icon_path="clear.png",
+                text="CANCEL DOWNLOAD",
+                font_size="11sp",
+                size_hint_y=None,
+                height=0,
+                opacity=0,
+                bg_color=(0.48, 0.12, 0.15, 1.0),
+                text_color=(1.0, 0.9, 0.9, 1.0),
+            )
+            self.cancel_download_btn.disabled = True
+            self.cancel_download_btn.bind(on_press=lambda ins: self.cancel_active_download())
+            self.status_card.add_widget(self.cancel_download_btn)
+
+            content.add_widget(self.status_card)
 
             # Prominent DOWNLOAD NOW Action Button (Opens download pop-up)
             self.download_btn = DownloadActionButton()
@@ -2735,20 +3005,149 @@ if KIVY_AVAILABLE:
                 selected_state["format"] = key
                 for k, c in option_cards.items():
                     c.set_selected(k == key)
+                if is_plist and "update_sel_ui" in locals():
+                    update_sel_ui()
 
             if is_plist:
+                raw_entries = list(media_item.get("entries") or [])
+                entries = [e for e in raw_entries if e]
+                total_entries = len(entries) if entries else count
+
+                # 1. Format Selection Header
+                fmt_sec_lbl = Label(
+                    text="[b][color=#FFB300]1. CHOOSE PLAYLIST FORMAT[/color][/b]",
+                    markup=True,
+                    font_size="11sp",
+                    size_hint_y=None,
+                    height=dp(20),
+                    halign="left",
+                )
+                fmt_sec_lbl.bind(size=fmt_sec_lbl.setter("text_size"))
+                opts_box.add_widget(fmt_sec_lbl)
+
                 plist_options = [
-                    ("Video (Max Quality - 1080p / 720p HD)", "Playlist: 1080p Full HD Video", f"Download all {count} videos in crystal clear 1080p HD", "1080p HD"),
-                    ("Video (720p HD MP4)", "Playlist: 720p HD MP4", f"Download all {count} videos in standard 720p HD", "720p HD"),
-                    ("Video (360p Fast MP4)", "Playlist: 360p Fast Video", f"Fast download for all {count} videos (Data Saver)", "360p"),
-                    ("Audio Only (HQ MP3 Music + Album Art)", "Playlist: HQ MP3 (320kbps Music)", f"Extract all {count} tracks as HQ MP3 with cover art & tags", "MP3 320k"),
-                    ("Audio Only (M4A AAC Fast)", "Playlist: M4A AAC Fast Audio", f"Fast download for all {count} audio streams", "M4A AAC"),
+                    ("Video (Max Quality - 1080p / 720p HD)", "1080p Full HD MP4", "High Definition Video (1920x1080)", "1080p HD"),
+                    ("Video (720p HD MP4)", "720p HD MP4", "Standard High Definition (1280x720)", "720p HD"),
+                    ("Video (360p Fast MP4)", "360p Fast MP4", "Compact file size, data saver", "360p"),
+                    ("Audio Only (HQ MP3 Music + Album Art)", "HQ MP3 (320kbps + Album Art)", "Studio quality music with cover & ID3 tags", "MP3 320k"),
+                    ("Audio Only (M4A AAC Fast)", "M4A AAC Fast Audio", "Fast AAC audio stream", "M4A AAC"),
                 ]
                 for key, title, sub, badge in plist_options:
-                    is_sel = (key == "Video (Max Quality - 1080p / 720p HD)")
+                    is_sel = (key == selected_state["format"])
                     c = FormatOptionCard(key, title, sub, badge, is_selected=is_sel, on_select_cb=on_option_picked)
                     option_cards[key] = c
                     opts_box.add_widget(c)
+
+                # 2. Item Selection Header (Select All / Clear All & Counter)
+                items_sec_lbl = Label(
+                    text="[b][color=#38BDF8]2. SELECT VIDEOS TO DOWNLOAD[/color][/b]",
+                    markup=True,
+                    font_size="11sp",
+                    size_hint_y=None,
+                    height=dp(24),
+                    halign="left",
+                )
+                items_sec_lbl.bind(size=items_sec_lbl.setter("text_size"))
+                opts_box.add_widget(items_sec_lbl)
+
+                sel_header = BoxLayout(orientation="horizontal", spacing=dp(6), size_hint_y=None, height=dp(32))
+                sel_count_lbl = Label(
+                    text=f"[b]Selected: {total_entries} of {total_entries}[/b]",
+                    markup=True,
+                    font_size="11.5sp",
+                    color=(0.95, 0.95, 1.0, 1.0),
+                    halign="left",
+                    valign="middle",
+                    size_hint_x=1.0,
+                )
+                sel_count_lbl.bind(size=sel_count_lbl.setter("text_size"))
+                sel_header.add_widget(sel_count_lbl)
+
+                sel_all_btn = IconActionButton(
+                    text="✔ ALL",
+                    font_size="10.5sp",
+                    size_hint=(None, None),
+                    size=(dp(72), dp(30)),
+                    bg_color=(0.12, 0.45, 0.22, 1.0),
+                    text_color=(1, 1, 1, 1),
+                )
+                sel_header.add_widget(sel_all_btn)
+
+                clear_all_btn = IconActionButton(
+                    icon_path="clear.png",
+                    text="CLEAR",
+                    font_size="10.5sp",
+                    size_hint=(None, None),
+                    size=(dp(76), dp(30)),
+                    bg_color=(0.28, 0.12, 0.15, 1.0),
+                    text_color=(1, 0.8, 0.8, 1),
+                )
+                sel_header.add_widget(clear_all_btn)
+                opts_box.add_widget(sel_header)
+
+                # Items checklist
+                selected_map = {i: True for i in range(total_entries)}
+                row_widgets = []
+
+                def update_sel_ui():
+                    num_sel = sum(1 for v in selected_map.values() if v)
+                    sel_count_lbl.text = f"[b]Selected: {num_sel} of {total_entries}[/b]"
+                    is_audio = "Audio" in selected_state["format"]
+                    noun = "TRACKS" if is_audio else "VIDEOS"
+                    if num_sel > 0:
+                        start_dl_btn.text = f"DOWNLOAD SELECTED ({num_sel} {noun})"
+                        start_dl_btn.disabled = False
+                        start_dl_btn.set_bg_color((1.0, 0.68, 0.0, 1.0))
+                    else:
+                        start_dl_btn.text = "SELECT AT LEAST 1 ITEM"
+                        start_dl_btn.disabled = True
+                        start_dl_btn.set_bg_color((0.25, 0.25, 0.30, 1.0))
+
+                def on_item_toggle(item_idx, is_chk):
+                    selected_map[item_idx] = is_chk
+                    update_sel_ui()
+
+                def on_select_all_pressed(ins):
+                    for k in selected_map:
+                        selected_map[k] = True
+                    for rw in row_widgets:
+                        rw.set_checked(True)
+                    update_sel_ui()
+
+                def on_clear_all_pressed(ins):
+                    for k in selected_map:
+                        selected_map[k] = False
+                    for rw in row_widgets:
+                        rw.set_checked(False)
+                    update_sel_ui()
+
+                sel_all_btn.bind(on_press=on_select_all_pressed)
+                clear_all_btn.bind(on_press=on_clear_all_pressed)
+
+                if entries:
+                    for i, entry in enumerate(entries):
+                        dur = format_duration(entry.get("duration")) if entry.get("duration") else ""
+                        item_t = entry.get("title") or f"Playlist Video #{i+1}"
+                        row_w = PlaylistItemRow(
+                            index=i + 1,
+                            title=item_t,
+                            duration=dur,
+                            is_checked=True,
+                            on_toggle_cb=on_item_toggle,
+                        )
+                        row_widgets.append(row_w)
+                        opts_box.add_widget(row_w)
+                else:
+                    empty_hint = Label(
+                        text="[color=#90CAF9]Extracting playlist items... All videos will be included.[/color]",
+                        markup=True,
+                        font_size="11sp",
+                        size_hint_y=None,
+                        height=dp(30),
+                        halign="left",
+                    )
+                    empty_hint.bind(size=empty_hint.setter("text_size"))
+                    opts_box.add_widget(empty_hint)
             else:
                 # Video formats header
                 v_sec_lbl = Label(
@@ -2802,7 +3201,7 @@ if KIVY_AVAILABLE:
 
             start_dl_btn = IconActionButton(
                 icon_path="download_arrow.png",
-                text="START DOWNLOAD",
+                text=f"DOWNLOAD PLAYLIST ({total_entries} VIDEOS)" if is_plist else "START DOWNLOAD",
                 bg_color=(1.0, 0.68, 0.0, 1.0),
                 text_color=(0.04, 0.05, 0.08, 1.0),
                 font_size="12sp",
@@ -2814,7 +3213,18 @@ if KIVY_AVAILABLE:
                 target_url = media_item.get("url")
                 if target_url:
                     self.url_input.text = target_url
-                self.start_download(target_url=target_url, chosen_format=fmt, is_playlist=is_plist)
+
+                chosen_indices = None
+                if is_plist and "selected_map" in locals():
+                    chosen_indices = [k for k, v in selected_map.items() if v]
+
+                self.start_download(
+                    target_url=target_url,
+                    chosen_format=fmt,
+                    is_playlist=is_plist,
+                    selected_indices=chosen_indices,
+                    entries=entries if is_plist and entries else None,
+                )
 
             start_dl_btn.bind(on_press=on_start_clicked)
             btn_row.add_widget(start_dl_btn)
@@ -2902,33 +3312,37 @@ if KIVY_AVAILABLE:
                 self.fetch_preview(normalized, auto_open_modal=False)
 
         def fetch_preview(self, url: str, auto_open_modal: bool = False):
-            """Fetch video or playlist thumbnail and details in a background thread."""
+            """Fetch video or playlist thumbnail and details in a background thread with multi-platform support."""
             def preview_worker():
                 try:
                     import yt_dlp
                     safe_logger = AndroidYTDLLogger()
+                    plat = detect_media_platform(url)
+
                     ydl_opts = {
                         "extract_flat": "in_playlist",
                         "skip_download": True,
                         "logger": safe_logger,
-                        "socket_timeout": 15,
+                        "socket_timeout": 18,
                         "quiet": True,
                         "no_warnings": True,
-                        "extractor_args": {
+                    }
+                    if plat == "YouTube":
+                        ydl_opts["extractor_args"] = {
                             "youtube": {
                                 "player_client": ["android", "web"]
                             }
-                        },
-                    }
+                        }
+
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         info = ydl.extract_info(url, download=False)
                         if not info:
                             return
 
                         is_playlist = info.get("_type") == "playlist" or "entries" in info
-                        raw_title = info.get("title") or "YouTube Media"
+                        raw_title = info.get("title") or f"{plat} Media"
                         clean_title = safe_display_text(raw_title)
-                        uploader = safe_display_text(info.get("uploader") or info.get("channel") or "YouTube")
+                        uploader = safe_display_text(info.get("uploader") or info.get("channel") or plat)
                         thumb = info.get("thumbnail") or ""
 
                         if is_playlist:
@@ -2945,9 +3359,11 @@ if KIVY_AVAILABLE:
                                     )
                             btn_text = f"DOWNLOAD PLAYLIST ({count} VIDEOS)" if count > 1 else "DOWNLOAD NOW"
                         else:
+                            entries = []
                             count = 1
                             dur_str = format_duration(info.get("duration"))
-                            meta_str = f"{dur_str} • {uploader}"
+                            plat_tag = f"[color=#FFB300]{plat.upper()}[/color]" if plat != "YouTube" else f"[color=#38BDF8]VIDEO[/color]"
+                            meta_str = f"{plat_tag} • {dur_str} • {uploader}"
                             btn_text = "DOWNLOAD NOW"
 
                         self.current_preview_info = {
@@ -2959,6 +3375,8 @@ if KIVY_AVAILABLE:
                             "duration": dur_str,
                             "is_playlist": is_playlist,
                             "count": count,
+                            "entries": entries,
+                            "platform": plat,
                         }
 
                         Clock.schedule_once(
@@ -2968,18 +3386,21 @@ if KIVY_AVAILABLE:
                             Clock.schedule_once(lambda dt: self.open_download_modal(self.current_preview_info), 0.2)
                 except Exception as e:
                     print(f"[Preview] Fetch notice: {e}")
+                    plat = detect_media_platform(url)
                     self.current_preview_info = {
-                        "title": "YouTube Media",
+                        "title": f"{plat} Media",
                         "url": url,
                         "thumb": "",
-                        "channel": "YouTube",
-                        "uploader": "YouTube",
+                        "channel": plat,
+                        "uploader": plat,
                         "duration": "Media",
                         "is_playlist": "playlist" in url.lower() or "list=" in url.lower(),
                         "count": 1,
+                        "entries": [],
+                        "platform": plat,
                     }
                     Clock.schedule_once(
-                        lambda dt: self.update_preview_ui("YouTube Media", "Ready to download", "", "DOWNLOAD NOW")
+                        lambda dt: self.update_preview_ui(f"{plat} Media", "Ready to download", "", "DOWNLOAD NOW")
                     )
                     if auto_open_modal:
                         Clock.schedule_once(lambda dt: self.open_download_modal(self.current_preview_info), 0.2)
@@ -3077,8 +3498,9 @@ if KIVY_AVAILABLE:
                 print(f"[Android] handle_intent_payload error: {e}")
 
         def update_status(self, text: str, progress_val: Optional[float] = None):
-            self.status_label.text = text
-            if progress_val is not None:
+            if hasattr(self, "status_label") and self.status_label:
+                self.status_label.text = text
+            if progress_val is not None and hasattr(self, "progress_bar") and self.progress_bar:
                 self.progress_bar.value = progress_val
 
         # -----------------------------------------------------------------
@@ -3178,7 +3600,10 @@ if KIVY_AVAILABLE:
                         bg_color=(0.08, 0.50, 0.24, 1.0),
                         text_color=(1, 1, 1, 1),
                     )
-                    play_btn.bind(on_press=lambda ins, p=media_path: open_media_file(p))
+                    if is_audio_file:
+                        play_btn.bind(on_press=lambda ins, p=media_path: self.play_audio_track(p))
+                    else:
+                        play_btn.bind(on_press=lambda ins, p=media_path: open_media_file(p))
                     row.add_widget(play_btn)
 
                     # DELETE BUTTON with icon
@@ -3219,27 +3644,497 @@ if KIVY_AVAILABLE:
 
             threading.Thread(target=async_delete, daemon=True).start()
 
-        # -----------------------------------------------------------------
-        # Download Execution Logic (Strict Filename Truncation + Auto-Fallback)
-        # -----------------------------------------------------------------
-        def start_download(self, instance=None, target_url: Optional[str] = None, chosen_format: Optional[str] = None, is_playlist: Optional[bool] = None):
-            """Validate inputs and launch background download thread."""
-            url = target_url or self.url_input.text.strip()
-            if not url:
-                self.update_status("[color=#FF5252]Please paste a YouTube link first![/color]", 0)
+        def on_platform_chip_clicked(self, platform_name: str):
+            """Handle platform chip selection and update contextual placeholder."""
+            self.selected_platform = platform_name
+            for name, btn in getattr(self, "platform_chips", {}).items():
+                if name == platform_name:
+                    btn.background_color = (1.0, 0.72, 0.0, 1.0)
+                    btn.color = (0.05, 0.07, 0.12, 1.0)
+                else:
+                    btn.background_color = (0.12, 0.15, 0.22, 1.0)
+                    btn.color = (0.75, 0.80, 0.90, 1.0)
+
+            hints = {
+                "ALL": "Search YouTube or paste any video/playlist link...",
+                "YOUTUBE": "Paste YouTube link or search videos & playlists...",
+                "INSTAGRAM": "Paste Instagram Reel or Post link...",
+                "FACEBOOK": "Paste Facebook video or reel link...",
+                "TIKTOK": "Paste TikTok video link...",
+                "TWITTER / X": "Paste Twitter / X video link...",
+            }
+            if hasattr(self, "url_input"):
+                self.url_input.hint_text = hints.get(platform_name, "Paste video or audio link...")
+
+        def cancel_active_download(self):
+            """Trigger immediate cancellation of running download and partial file cleanup (Feature 4)."""
+            if not self.download_state.get("is_active"):
+                return
+            self.download_state["cancel_requested"] = True
+            self.update_status("[color=#FFB300]Cancelling download...[/color]", 0)
+            if hasattr(self, "cancel_download_btn"):
+                self.cancel_download_btn.disabled = True
+
+        def create_mini_player_bar(self) -> BoxLayout:
+            """Persistent mini audio player bar floating directly above footer navigation (Feature 3)."""
+            bar = StyledCard(
+                orientation="vertical",
+                padding=[dp(8), dp(4), dp(8), dp(4)],
+                spacing=dp(3),
+                size_hint_y=None,
+                height=0,
+                opacity=0,
+                bg_color=(0.10, 0.12, 0.20, 0.98),
+                radius=12,
+            )
+            bar.disabled = True
+
+            # Row 1: Thin playback progress bar
+            self.mini_player_progress = ProgressBar(
+                max=100,
+                value=0,
+                size_hint_y=None,
+                height=dp(3),
+            )
+            bar.add_widget(self.mini_player_progress)
+
+            # Row 2: Controls & Info
+            ctrl_row = BoxLayout(orientation="horizontal", spacing=dp(6), size_hint_y=None, height=dp(42))
+
+            play_icon_path = get_asset_icon("play.png")
+            if play_icon_path:
+                ctrl_row.add_widget(
+                    Image(
+                        source=play_icon_path,
+                        size_hint=(None, None),
+                        size=(dp(24), dp(24)),
+                        allow_stretch=True,
+                        keep_ratio=True,
+                        pos_hint={"center_y": 0.5},
+                    )
+                )
+
+            info_col = BoxLayout(orientation="vertical", spacing=dp(1), size_hint_x=1.0)
+            self.mini_player_title = Label(
+                text="[b]No Track Selected[/b]",
+                markup=True,
+                font_size="11sp",
+                color=(1, 1, 1, 1),
+                halign="left",
+                valign="middle",
+                size_hint_y=None,
+                height=dp(20),
+            )
+            self.mini_player_title.bind(size=self.mini_player_title.setter("text_size"))
+            info_col.add_widget(self.mini_player_title)
+
+            self.mini_player_time = Label(
+                text="0:00 / 0:00 • Offline Music",
+                font_size="9.5sp",
+                color=(0.55, 0.75, 1.0, 0.9),
+                halign="left",
+                valign="middle",
+                size_hint_y=None,
+                height=dp(14),
+            )
+            self.mini_player_time.bind(size=self.mini_player_time.setter("text_size"))
+            info_col.add_widget(self.mini_player_time)
+            ctrl_row.add_widget(info_col)
+
+            self.mini_player_prev_btn = IconActionButton(
+                text="⏮",
+                font_size="13sp",
+                size_hint=(None, None),
+                size=(dp(32), dp(32)),
+                bg_color=(0.14, 0.18, 0.28, 1.0),
+                text_color=(0.9, 0.9, 1.0, 1.0),
+                pos_hint={"center_y": 0.5},
+            )
+            self.mini_player_prev_btn.bind(on_press=lambda ins: self.play_prev_audio())
+            ctrl_row.add_widget(self.mini_player_prev_btn)
+
+            self.mini_player_play_btn = IconActionButton(
+                icon_path="play.png",
+                text="⏸",
+                font_size="12sp",
+                size_hint=(None, None),
+                size=(dp(46), dp(32)),
+                bg_color=(1.0, 0.72, 0.0, 1.0),
+                text_color=(0.04, 0.05, 0.08, 1.0),
+                pos_hint={"center_y": 0.5},
+            )
+            self.mini_player_play_btn.bind(on_press=lambda ins: self.toggle_audio_playback())
+            ctrl_row.add_widget(self.mini_player_play_btn)
+
+            self.mini_player_next_btn = IconActionButton(
+                text="⏭",
+                font_size="13sp",
+                size_hint=(None, None),
+                size=(dp(32), dp(32)),
+                bg_color=(0.14, 0.18, 0.28, 1.0),
+                text_color=(0.9, 0.9, 1.0, 1.0),
+                pos_hint={"center_y": 0.5},
+            )
+            self.mini_player_next_btn.bind(on_press=lambda ins: self.play_next_audio())
+            ctrl_row.add_widget(self.mini_player_next_btn)
+
+            self.mini_player_close_btn = IconActionButton(
+                icon_path="clear.png",
+                text="✕",
+                font_size="11sp",
+                size_hint=(None, None),
+                size=(dp(30), dp(32)),
+                bg_color=(0.28, 0.10, 0.12, 1.0),
+                text_color=(1.0, 0.7, 0.7, 1.0),
+                pos_hint={"center_y": 0.5},
+            )
+            self.mini_player_close_btn.bind(on_press=lambda ins: self.close_mini_player())
+            ctrl_row.add_widget(self.mini_player_close_btn)
+
+            bar.add_widget(ctrl_row)
+            return bar
+
+        def play_audio_track(self, file_path: Path):
+            """Load and play local audio file in the built-in mini music player."""
+            if not file_path or not file_path.exists():
                 return
 
-            normalized = normalize_youtube_url(url)
+            # Refresh local audio playlist
+            target_dir = get_android_download_dir()
+            audio_files = []
+            for ext in ("*.mp3", "*.m4a", "*.wav", "*.ogg"):
+                audio_files.extend(target_dir.glob(ext))
+            audio_files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+            self.audio_playlist = audio_files
+            if file_path in self.audio_playlist:
+                self.audio_index = self.audio_playlist.index(file_path)
+
+            if self.current_sound:
+                try:
+                    self.current_sound.stop()
+                    self.current_sound.unload()
+                except Exception:
+                    pass
+                self.current_sound = None
+
+            try:
+                self.current_sound = SoundLoader.load(str(file_path.resolve()))
+            except Exception as e:
+                print(f"[SoundLoader] Error loading {file_path.name}: {e}")
+                self.current_sound = None
+
+            if not self.current_sound:
+                open_media_file(file_path)
+                return
+
+            self.current_track_path = file_path
+            self.is_audio_playing = True
+            self.mini_player_bar.height = dp(56)
+            self.mini_player_bar.opacity = 1.0
+            self.mini_player_bar.disabled = False
+
+            clean_t = safe_display_text(file_path.stem)
+            if len(clean_t) > 32:
+                clean_t = clean_t[:29] + "..."
+            self.mini_player_title.text = f"[b]{clean_t}[/b]"
+            self.mini_player_play_btn.text = "⏸"
+            self.mini_player_progress.value = 0
+
+            self.current_sound.play()
+
+            if not self.player_clock_event:
+                self.player_clock_event = Clock.schedule_interval(self._update_player_progress, 0.4)
+
+        def toggle_audio_playback(self):
+            """Toggle play / pause on current active audio track."""
+            if not self.current_sound:
+                return
+            if self.current_sound.state == "play":
+                self.current_sound.stop()
+                self.is_audio_playing = False
+                self.mini_player_play_btn.text = "▶"
+            else:
+                self.current_sound.play()
+                self.is_audio_playing = True
+                self.mini_player_play_btn.text = "⏸"
+
+        def play_next_audio(self):
+            """Play next audio track in library queue."""
+            if not self.audio_playlist:
+                return
+            self.audio_index = (self.audio_index + 1) % len(self.audio_playlist)
+            self.play_audio_track(self.audio_playlist[self.audio_index])
+
+        def play_prev_audio(self):
+            """Play previous audio track in library queue."""
+            if not self.audio_playlist:
+                return
+            self.audio_index = (self.audio_index - 1) % len(self.audio_playlist)
+            self.play_audio_track(self.audio_playlist[self.audio_index])
+
+        def close_mini_player(self):
+            """Stop playback, unload audio engine, and collapse mini player bar."""
+            if self.current_sound:
+                try:
+                    self.current_sound.stop()
+                    self.current_sound.unload()
+                except Exception:
+                    pass
+                self.current_sound = None
+
+            if self.player_clock_event:
+                self.player_clock_event.cancel()
+                self.player_clock_event = None
+
+            self.is_audio_playing = False
+            self.mini_player_bar.height = 0
+            self.mini_player_bar.opacity = 0
+            self.mini_player_bar.disabled = True
+
+        def _update_player_progress(self, dt):
+            """Update mini player progress bar and elapsed/duration label."""
+            if not self.current_sound:
+                return
+            if self.current_sound.state == "play":
+                pos = self.current_sound.get_pos()
+                length = self.current_sound.length or 0
+                if length > 0:
+                    pct = (pos / length) * 100
+                    self.mini_player_progress.value = min(100, max(0, pct))
+                    self.mini_player_time.text = f"{format_duration(pos)} / {format_duration(length)} • Playing"
+                else:
+                    self.mini_player_time.text = f"{format_duration(pos)} • Playing"
+            elif self.current_sound.state == "stop" and self.is_audio_playing:
+                pos = self.current_sound.get_pos()
+                length = self.current_sound.length or 0
+                if length > 0 and pos >= (length - 1.0):
+                    self.play_next_audio()
+
+        def check_for_updates(self, user_triggered: bool = True):
+            """Query GitHub Releases API for new updates and display modal if newer version found (Feature 6)."""
+            if user_triggered:
+                self.update_status("Checking GitHub for app updates...", 25)
+
+            def worker():
+                try:
+                    import urllib.request
+                    import json
+                    api_url = "https://api.github.com/repos/msk-ytdl/msk-ytdl/releases/latest"
+                    req = urllib.request.Request(
+                        api_url,
+                        headers={"User-Agent": "MSK-YTDL-App", "Accept": "application/vnd.github.v3+json"},
+                    )
+                    with urllib.request.urlopen(req, timeout=8) as resp:
+                        if resp.status == 200:
+                            data = json.loads(resp.read().decode("utf-8"))
+                            tag = data.get("tag_name", "").lstrip("v")
+                            curr_ver = get_app_version()
+
+                            tag_nums = [int(x) for x in re.findall(r"\d+", tag)]
+                            curr_nums = [int(x) for x in re.findall(r"\d+", curr_ver)]
+
+                            is_newer = False
+                            for r, c in zip(tag_nums, curr_nums):
+                                if r > c:
+                                    is_newer = True
+                                    break
+                                elif r < c:
+                                    break
+                            if not is_newer and len(tag_nums) > len(curr_nums) and tag_nums[:len(curr_nums)] == curr_nums:
+                                is_newer = True
+
+                            if is_newer:
+                                release_name = data.get("name") or f"MSK YTDL v{tag}"
+                                body = data.get("body") or "New release with performance enhancements and bug fixes."
+                                html_url = data.get("html_url") or "https://github.com/msk-ytdl/msk-ytdl/releases"
+                                apk_url = None
+                                for asset in data.get("assets", []):
+                                    if asset.get("name", "").endswith(".apk"):
+                                        apk_url = asset.get("browser_download_url")
+                                        break
+                                Clock.schedule_once(
+                                    lambda dt: self.open_update_modal(tag, release_name, body, apk_url or html_url)
+                                )
+                                Clock.schedule_once(
+                                    lambda dt: self.update_status(f"[color=#00E676]New Update Available:[/color] v{tag}", 100)
+                                )
+                            else:
+                                if user_triggered:
+                                    Clock.schedule_once(
+                                        lambda dt: self.update_status(f"[color=#00E676]Up to date![/color] (v{curr_ver} is latest)", 100)
+                                    )
+                except Exception as e:
+                    print(f"[UpdateChecker] Notice: {e}")
+                    if user_triggered:
+                        Clock.schedule_once(
+                            lambda dt: self.update_status("[color=#FFB300]Update check skipped: network unavailable[/color]", 0)
+                        )
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def open_update_modal(self, new_version: str, release_title: str, changelog: str, download_url: str):
+            """Open dedicated in-app modal announcing available GitHub release with changelog and 1-tap download."""
+            modal = ModalView(size_hint=(0.92, 0.72), auto_dismiss=True)
+            content = StyledCard(
+                orientation="vertical",
+                padding=[dp(16), dp(14)],
+                spacing=dp(10),
+                bg_color=(0.08, 0.10, 0.16, 0.98),
+                radius=16,
+            )
+
+            # Header Row
+            header_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(32))
+            settings_icon = get_asset_icon("settings.png")
+            if settings_icon:
+                header_row.add_widget(
+                    Image(source=settings_icon, size_hint=(None, None), size=(dp(24), dp(24)), allow_stretch=True, keep_ratio=True)
+                )
+            h_title = Label(
+                text="[b][color=#FFB300]New Update Available![/color][/b]",
+                markup=True,
+                font_size="15sp",
+                halign="left",
+                valign="middle",
+                size_hint_x=1.0,
+            )
+            h_title.bind(size=h_title.setter("text_size"))
+            header_row.add_widget(h_title)
+
+            close_btn = Button(
+                text="✕",
+                font_size="15sp",
+                bold=True,
+                size_hint=(None, None),
+                size=(dp(28), dp(28)),
+                background_color=(0.20, 0.22, 0.30, 1.0),
+                color=(1, 1, 1, 1),
+            )
+            close_btn.bind(on_press=modal.dismiss)
+            header_row.add_widget(close_btn)
+            content.add_widget(header_row)
+
+            # Version comparison card
+            curr_v = get_app_version()
+            v_card = StyledCard(
+                orientation="horizontal",
+                padding=[dp(12), dp(8)],
+                spacing=dp(10),
+                size_hint_y=None,
+                height=dp(52),
+                bg_color=(0.12, 0.15, 0.24, 1.0),
+            )
+            v_info = Label(
+                text=f"[b]Version {new_version}[/b]  [color=#00E676]● LATEST[/color]\n[size=10sp][color=#90CAF9]Current installed: v{curr_v}[/color][/size]",
+                markup=True,
+                font_size="12sp",
+                halign="left",
+                valign="middle",
+                size_hint_x=1.0,
+            )
+            v_info.bind(size=v_info.setter("text_size"))
+            v_card.add_widget(v_info)
+            content.add_widget(v_card)
+
+            # Changelog Label & ScrollView
+            content.add_widget(
+                Label(
+                    text="[b]Release Notes & What's New:[/b]",
+                    markup=True,
+                    font_size="11.5sp",
+                    color=(0.85, 0.88, 0.95, 1.0),
+                    size_hint_y=None,
+                    height=dp(18),
+                    halign="left",
+                )
+            )
+            ch_scroll = ScrollView(do_scroll_x=False, do_scroll_y=True, size_hint_y=1.0)
+            ch_lbl = Label(
+                text=safe_display_text(changelog) or "Bug fixes, performance improvements, and new features.",
+                font_size="11sp",
+                color=(0.75, 0.80, 0.90, 1.0),
+                size_hint_y=None,
+                halign="left",
+                valign="top",
+            )
+            ch_lbl.bind(width=lambda ins, w: setattr(ins, "text_size", (w, None)))
+            ch_lbl.bind(texture_size=lambda ins, ts: setattr(ins, "height", max(dp(60), ts[1] + dp(10))))
+            ch_scroll.add_widget(ch_lbl)
+            content.add_widget(ch_scroll)
+
+            # Action Buttons: [⬇ DOWNLOAD UPDATE] and [✕ LATER]
+            btn_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(42))
+            dl_update_btn = IconActionButton(
+                icon_path="download_arrow.png",
+                text="DOWNLOAD UPDATE",
+                bg_color=(1.0, 0.68, 0.0, 1.0),
+                text_color=(0.04, 0.05, 0.08, 1.0),
+                font_size="11.5sp",
+                size_hint_x=0.7,
+            )
+            def on_dl_update(ins):
+                modal.dismiss()
+                play_online_video(download_url)
+            dl_update_btn.bind(on_press=on_dl_update)
+            btn_row.add_widget(dl_update_btn)
+
+            later_btn = IconActionButton(
+                icon_path="clear.png",
+                text="LATER",
+                bg_color=(0.18, 0.20, 0.28, 1.0),
+                text_color=(0.80, 0.85, 0.95, 1.0),
+                font_size="11.5sp",
+                size_hint_x=0.3,
+            )
+            later_btn.bind(on_press=modal.dismiss)
+            btn_row.add_widget(later_btn)
+            content.add_widget(btn_row)
+
+            modal.add_widget(content)
+            modal.open()
+
+        # -----------------------------------------------------------------
+        # Download Execution Logic (Multi-Platform, Pause/Cancel, Playlist Multi-Select)
+        # -----------------------------------------------------------------
+        def start_download(
+            self,
+            instance=None,
+            target_url: Optional[str] = None,
+            chosen_format: Optional[str] = None,
+            is_playlist: Optional[bool] = None,
+            selected_indices: Optional[List[int]] = None,
+            entries: Optional[List[Dict[str, Any]]] = None,
+        ):
+            """Validate inputs and launch background download thread with pause/cancel queue support."""
+            url = target_url or self.url_input.text.strip()
+            if not url:
+                self.update_status("[color=#FF5252]Please paste a video or audio link first![/color]", 0)
+                return
+
+            normalized = normalize_media_url(url)
             if not normalized:
-                self.update_status("[color=#FF5252]Invalid link. Paste a valid YouTube URL.[/color]", 0)
+                self.update_status("[color=#FF5252]Invalid link. Paste a valid URL.[/color]", 0)
                 return
 
             url = normalized
             selected_format = chosen_format or (self.quality_spinner.text if hasattr(self, "quality_spinner") else "Video (Max Quality - 1080p / 720p HD)")
             is_audio = "Audio" in selected_format
+            plat = detect_media_platform(url)
+
+            # Update active download state (Feature 4)
+            self.download_state["is_active"] = True
+            self.download_state["cancel_requested"] = False
+            self.download_state["current_part_files"].clear()
 
             self.download_btn.disabled = True
-            self.update_status("Starting download engine...", 5)
+            if hasattr(self, "cancel_download_btn"):
+                self.cancel_download_btn.disabled = False
+                self.cancel_download_btn.height = dp(32)
+                self.cancel_download_btn.opacity = 1.0
+            if hasattr(self, "status_card"):
+                self.status_card.height = dp(112)
+
+            self.update_status(f"Starting {plat} download engine...", 5)
 
             def worker():
                 try:
@@ -3254,9 +4149,15 @@ if KIVY_AVAILABLE:
 
                     current_item_meta = {"index": 1, "total": 1, "title": "Video"}
 
-                    # Progress callback to animate Kivy ProgressBar and Android Notification Bar
                     def progress_hook(d):
+                        if self.download_state.get("cancel_requested"):
+                            raise DownloadCancelledException("Download cancelled by user.")
+
                         if d.get("status") == "downloading":
+                            fn = d.get("filename")
+                            if fn:
+                                self.download_state["current_part_files"].add(str(fn))
+
                             total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
                             downloaded = d.get("downloaded_bytes") or 0
                             if total > 0:
@@ -3280,7 +4181,6 @@ if KIVY_AVAILABLE:
                                     lambda dt, msg=status_msg, p=overall_pct: self.update_status(msg, p)
                                 )
 
-                                # Update Android notification bar at throttled interval
                                 now = time.time()
                                 if (now - self.last_notif_time) > 1.2 or pct >= 99:
                                     self.last_notif_time = now
@@ -3295,11 +4195,10 @@ if KIVY_AVAILABLE:
                     has_ffmpeg = bool(shutil.which("ffmpeg"))
                     safe_logger = AndroidYTDLLogger()
 
-                    # Base options for downloading individual media items cleanly
                     base_ydl_opts = {
-                        "restrictfilenames": True,      # Replaces non-ASCII & special characters to prevent Android Errno 36
-                        "windowsfilenames": True,       # Strips forbidden filesystem characters across all filesystems
-                        "trim_file_name": 45,           # Hard caps filename length to 45 chars
+                        "restrictfilenames": True,
+                        "windowsfilenames": True,
+                        "trim_file_name": 45,
                         "progress_hooks": [progress_hook],
                         "logger": safe_logger,
                         "socket_timeout": 35,
@@ -3307,18 +4206,19 @@ if KIVY_AVAILABLE:
                         "quiet": True,
                         "no_warnings": True,
                         "no_color": True,
-                        "nooverwrites": False,          # Prevent silent skip when downloading new videos
-                        "continuedl": False,            # Clean download stream
-                        "noplaylist": True,             # In per-item loop, download single video without re-extracting playlist
+                        "nooverwrites": False,
+                        "continuedl": False,
+                        "noplaylist": True,
                         "concurrent_fragment_downloads": 4,
                         "buffersize": 1048576,
                         "http_chunk_size": 10485760,
-                        "extractor_args": {
+                    }
+                    if plat == "YouTube":
+                        base_ydl_opts["extractor_args"] = {
                             "youtube": {
                                 "player_client": ["android", "web"]
                             }
-                        },
-                    }
+                        }
 
                     if is_audio:
                         if "MP3" in selected_format:
@@ -3332,64 +4232,69 @@ if KIVY_AVAILABLE:
                             else:
                                 base_ydl_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio/18/best"
                         else:
-                            # Fast M4A AAC
                             base_ydl_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio/best"
                     else:
                         if "360p" in selected_format:
-                            # Explicit 360p fast mode
                             base_ydl_opts["format"] = "18/best[height<=360][vcodec!=none][acodec!=none]/best"
                         elif "720p" in selected_format:
-                            # Explicit 720p HD mode
                             if has_ffmpeg:
                                 base_ydl_opts["format"] = "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/22/best[height<=720]/18/best"
                             else:
                                 base_ydl_opts["format"] = "22/best[height<=720][vcodec!=none][acodec!=none]/18/best"
                         else:
-                            # Max Quality: 1080p Full HD -> 720p HD -> 360p (Max to Min priority)
                             if has_ffmpeg:
                                 base_ydl_opts["format"] = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/22/best[height<=1080]/best[height<=720]/18/best"
                             else:
                                 base_ydl_opts["format"] = "22/best[height<=1080][vcodec!=none][acodec!=none]/best[height<=720][vcodec!=none][acodec!=none]/18/best"
 
-                    # 1. Fast metadata extraction (without format restrictions) to inspect playlist vs single video
-                    flat_opts = {
-                        "extract_flat": "in_playlist",
-                        "skip_download": True,
-                        "logger": safe_logger,
-                        "socket_timeout": 25,
-                        "quiet": True,
-                        "no_warnings": True,
-                        "extractor_args": {
-                            "youtube": {
-                                "player_client": ["android", "web"]
+                    # Resolve items list
+                    active_entries = []
+                    if entries:
+                        active_entries = list(entries)
+                    else:
+                        flat_opts = {
+                            "extract_flat": "in_playlist",
+                            "skip_download": True,
+                            "logger": safe_logger,
+                            "socket_timeout": 25,
+                            "quiet": True,
+                            "no_warnings": True,
+                        }
+                        if plat == "YouTube":
+                            flat_opts["extractor_args"] = {
+                                "youtube": {
+                                    "player_client": ["android", "web"]
+                                }
                             }
-                        },
-                    }
-                    with yt_dlp.YoutubeDL(flat_opts) as flat_ydl:
-                        media_meta = flat_ydl.extract_info(url, download=False)
+                        with yt_dlp.YoutubeDL(flat_opts) as flat_ydl:
+                            media_meta = flat_ydl.extract_info(url, download=False)
+                            if not media_meta:
+                                raise RuntimeError("Could not retrieve media details.")
+                            is_pl = media_meta.get("_type") == "playlist" or "entries" in media_meta
+                            raw_list = list(media_meta.get("entries") or []) if is_pl else [media_meta]
+                            active_entries = [e for e in raw_list if e]
 
-                    if not media_meta:
-                        raise RuntimeError("Could not retrieve media details.")
+                    # Filter to selected indices if provided (Feature 1)
+                    if selected_indices is not None and len(selected_indices) > 0:
+                        active_entries = [active_entries[i] for i in selected_indices if i < len(active_entries)]
 
-                    is_playlist = media_meta.get("_type") == "playlist" or "entries" in media_meta
-                    raw_entries = list(media_meta.get("entries") or []) if is_playlist else [media_meta]
-                    entries = [e for e in raw_entries if e]
-                    total_count = len(entries) if entries else 1
-
+                    total_count = len(active_entries) if active_entries else 1
                     current_item_meta["total"] = total_count
 
-                    if is_playlist and total_count > 1:
+                    if total_count > 1:
                         Clock.schedule_once(
                             lambda dt, cnt=total_count: self.update_status(
-                                f"[color=#FFB300]Playlist Detected:[/color] Starting download of {cnt} videos...", 5
+                                f"[color=#FFB300]Queue Ready:[/color] Starting download of {cnt} items...", 5
                             )
                         )
 
                     saved_files: List[Path] = []
                     skipped_count = 0
 
-                    # 2. Iterate through items and download each with canonical watch URL and unique ID
-                    for idx, item in enumerate(entries, start=1):
+                    for idx, item in enumerate(active_entries, start=1):
+                        if self.download_state.get("cancel_requested"):
+                            raise DownloadCancelledException("Download cancelled by user.")
+
                         raw_item_title = item.get("title") or f"Item {idx}"
                         clean_title = sanitize_storage_filename(raw_item_title, f"Video_{idx}")
                         item_id = item.get("id") or ""
@@ -3401,10 +4306,9 @@ if KIVY_AVAILABLE:
                                         item_id = m.group(1)
                                         break
 
-                        # CRITICAL: Always resolve canonical watch URL so yt-dlp uses YouTube extractor, not generic videoplayback
                         item_url = get_canonical_video_url(item, fallback_url=url)
                         item_thumb = item.get("thumbnail") or (f"https://i.ytimg.com/vi/{item_id}/hqdefault.jpg" if item_id else None)
-                        item_uploader = item.get("uploader") or item.get("channel") or media_meta.get("uploader") or "MSK YTDL"
+                        item_uploader = item.get("uploader") or item.get("channel") or plat
 
                         current_item_meta["index"] = idx
                         current_item_meta["title"] = raw_item_title
@@ -3418,7 +4322,6 @@ if KIVY_AVAILABLE:
                             )
                             self.notification_manager.show_progress(f"[{idx}/{total_count}] {raw_item_title}", overall_start_pct)
 
-                        # Set individual item output template with clean title and unique ID
                         item_opts = dict(base_ydl_opts)
                         if total_count > 1:
                             item_opts["outtmpl"] = str(target_dir / f"[{idx:02d}] %(title).35s [%(id)s].%(ext)s")
@@ -3428,6 +4331,8 @@ if KIVY_AVAILABLE:
                         try:
                             with yt_dlp.YoutubeDL(item_opts) as ydl:
                                 info = ydl.extract_info(item_url, download=True)
+                        except DownloadCancelledException:
+                            raise
                         except Exception as dl_err:
                             err_str = str(dl_err)
                             if "File name too long" in err_str or "Errno 36" in err_str:
@@ -3437,7 +4342,7 @@ if KIVY_AVAILABLE:
                                 with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
                                     info = ydl_fb.extract_info(item_url, download=True)
                             elif total_count > 1:
-                                print(f"[Playlist] Skipping item #{idx} ({raw_item_title}) due to: {dl_err}")
+                                print(f"[Queue] Skipping item #{idx} ({raw_item_title}) due to: {dl_err}")
                                 skipped_count += 1
                                 Clock.schedule_once(
                                     lambda dt, i=idx, tot=total_count: self.update_status(
@@ -3451,7 +4356,6 @@ if KIVY_AVAILABLE:
                         if not info:
                             continue
 
-                        # Locate saved file
                         saved_path: Optional[Path] = None
                         if "requested_downloads" in info and info["requested_downloads"]:
                             fp = info["requested_downloads"][0].get("filepath")
@@ -3471,7 +4375,7 @@ if KIVY_AVAILABLE:
                             if candidates:
                                 saved_path = candidates[0]
 
-                        # Critical safety: Check if file was saved as 'videoplayback' and rename immediately
+                        # Check if file was saved as 'videoplayback' and rename
                         if not saved_path or "videoplayback" in saved_path.name.lower():
                             for p in target_dir.glob("*videoplayback*"):
                                 if p.is_file():
@@ -3489,23 +4393,19 @@ if KIVY_AVAILABLE:
                                     break
 
                         if saved_path and saved_path.exists():
-                            # Embed HQ Album Art & ID3 Tags for Audio
                             if is_audio:
                                 embed_audio_metadata(saved_path, raw_item_title, item_uploader, item_thumb)
-
-                            # Register in Android MediaStore Gallery / Music library
                             scan_media_file(saved_path)
                             saved_files.append(saved_path)
 
-                    # Download Complete Actions
                     if saved_files:
                         last_file = saved_files[-1]
                         if total_count > 1:
-                            msg = f"[color=#00E676]Playlist Complete![/color] {len(saved_files)} of {total_count} saved."
-                            self.notification_manager.show_finished("MSK YTDL Playlist", f"{len(saved_files)} videos saved")
+                            msg = f"[color=#00E676]Download Complete![/color] {len(saved_files)} of {total_count} saved."
+                            self.notification_manager.show_finished(f"MSK YTDL {plat}", f"{len(saved_files)} items saved")
                         else:
                             msg = f"[color=#00E676]Done![/color] Saved: {last_file.name[:32]}"
-                            self.notification_manager.show_finished("MSK YTDL", last_file.name[:32])
+                            self.notification_manager.show_finished(f"MSK YTDL {plat}", last_file.name[:32])
 
                         Clock.schedule_once(lambda dt, m=msg: self.update_status(m, 100))
                     else:
@@ -3513,8 +4413,37 @@ if KIVY_AVAILABLE:
                             lambda dt: self.update_status("[color=#00E676]Download completed![/color]", 100)
                         )
 
-                    # Refresh offline library listing and badge
                     Clock.schedule_once(lambda dt: self.refresh_library(), 0.5)
+
+                except DownloadCancelledException:
+                    print("[MSK-YTDL] Download cancelled by user.")
+                    self.notification_manager.cancel()
+                    # Clean up partial fragments
+                    try:
+                        for pf in list(self.download_state.get("current_part_files", [])):
+                            if os.path.exists(pf):
+                                try:
+                                    os.remove(pf)
+                                except Exception:
+                                    pass
+                        if target_dir.exists():
+                            for p in target_dir.glob("*.part"):
+                                try:
+                                    if time.time() - p.stat().st_mtime < 120:
+                                        p.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+                            for y in target_dir.glob("*.ytdl"):
+                                try:
+                                    if time.time() - y.stat().st_mtime < 120:
+                                        y.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+                    except Exception as ce:
+                        print(f"[Cleanup] Error removing partial files: {ce}")
+                    Clock.schedule_once(
+                        lambda dt: self.update_status("[color=#FFA000]Download Cancelled.[/color]", 0)
+                    )
 
                 except Exception as e:
                     import traceback
@@ -3524,15 +4453,15 @@ if KIVY_AVAILABLE:
                     if "File name too long" in err_msg or "Errno 36" in err_msg:
                         user_friendly_err = "Storage filename error. Please try downloading again."
                     elif "Requested format is not available" in err_msg:
-                        user_friendly_err = "Selected format not available for this video."
+                        user_friendly_err = "Selected format not available for this media."
                     elif "Video unavailable" in err_msg or "Private video" in err_msg:
-                        user_friendly_err = "Video is private or unavailable."
+                        user_friendly_err = "Media is private or unavailable."
                     elif "Sign in to confirm" in err_msg or "age-restricted" in err_msg:
-                        user_friendly_err = "Age-restricted video: sign-in required."
+                        user_friendly_err = "Age-restricted media: sign-in required."
                     elif "getaddrinfo failed" in err_msg or "timed out" in err_msg or "Network is unreachable" in err_msg:
                         user_friendly_err = "Network error. Check internet connection."
                     elif "ExtractorError" in err_msg or "not a valid URL" in err_msg:
-                        user_friendly_err = "Invalid YouTube URL. Please check the link."
+                        user_friendly_err = "Invalid URL or platform link. Please check."
                     else:
                         clean_err = err_msg.replace("ERROR: ", "").strip()
                         user_friendly_err = clean_err if clean_err else "Download failed."
@@ -3544,10 +4473,19 @@ if KIVY_AVAILABLE:
                         )
                     )
                 finally:
+                    self.download_state["is_active"] = False
+                    self.download_state["cancel_requested"] = False
+                    self.download_state["current_part_files"].clear()
                     def reset_ui_state(dt=None):
                         self.download_btn.disabled = False
                         self.download_btn.text = "DOWNLOAD NOW"
                         self.current_preview_url = ""
+                        if hasattr(self, "cancel_download_btn"):
+                            self.cancel_download_btn.disabled = True
+                            self.cancel_download_btn.height = 0
+                            self.cancel_download_btn.opacity = 0
+                        if hasattr(self, "status_card"):
+                            self.status_card.height = dp(72)
                     Clock.schedule_once(reset_ui_state)
 
             threading.Thread(target=worker, daemon=True).start()
