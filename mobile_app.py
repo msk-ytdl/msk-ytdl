@@ -441,6 +441,49 @@ def open_media_file(filepath: Path):
         print(f"[OpenMedia] Error opening file {filepath.name}: {e}")
 
 
+def play_online_video(video_url: str):
+    """
+    Launch YouTube video stream in YouTube App on Android or default desktop web player.
+    Provides authentic official YouTube player experience with zero buffering, 1080p/4K, and full controls.
+    """
+    if not video_url:
+        return
+    clean_url = str(video_url).strip()
+    vid_id = None
+    m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/|live/)([a-zA-Z0-9_-]{11})", clean_url)
+    if m:
+        vid_id = m.group(1)
+
+    try:
+        if is_running_on_android():
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            Intent = autoclass("android.content.Intent")
+            Uri = autoclass("android.net.Uri")
+            activity = PythonActivity.mActivity
+
+            if vid_id:
+                try:
+                    # Direct YouTube App intent
+                    app_intent = Intent(Intent.ACTION_VIEW, Uri.parse(f"vnd.youtube:{vid_id}"))
+                    app_intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    activity.startActivity(app_intent)
+                    return
+                except Exception:
+                    pass
+
+            # Fallback to standard web intent
+            web_intent = Intent(Intent.ACTION_VIEW, Uri.parse(clean_url))
+            web_intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            activity.startActivity(web_intent)
+        else:
+            # Desktop fallback (Windows / macOS / Linux)
+            import webbrowser
+            webbrowser.open(clean_url)
+    except Exception as e:
+        print(f"[Player] Error launching player for {clean_url}: {e}")
+
+
 def delete_media_file(filepath: Path) -> bool:
     """
     Robustly delete a media file from Android/desktop storage.
@@ -868,6 +911,122 @@ if KIVY_AVAILABLE:
             self.rect.size = self.size
 
 
+    class FormatOptionCard(ButtonBehavior, BoxLayout):
+        """Selectable format/quality row inside the Download Options Modal."""
+        def __init__(
+            self,
+            key: str,
+            title: str,
+            subtitle: str,
+            badge_text: str = "",
+            is_selected: bool = False,
+            on_select_cb=None,
+            **kwargs,
+        ):
+            super().__init__(**kwargs)
+            self.orientation = "horizontal"
+            self.size_hint_y = None
+            self.height = dp(52)
+            self.spacing = dp(8)
+            self.padding = [dp(10), dp(6)]
+            self.key = key
+            self.is_selected = is_selected
+            self.on_select_cb = on_select_cb
+
+            with self.canvas.before:
+                self._col_instr = Color(
+                    *( (0.22, 0.28, 0.44, 1.0) if is_selected else (0.11, 0.13, 0.20, 1.0) )
+                )
+                self._rect_instr = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(8)])
+            self.bind(pos=self._update_geom, size=self._update_geom)
+
+            # Indicator dot / radio
+            self.indicator_lbl = Label(
+                text="[b][color=#FFB300]●[/color][/b]" if is_selected else "[color=#607D8B]○[/color]",
+                markup=True,
+                font_size="16sp",
+                size_hint=(None, 1.0),
+                width=dp(22),
+                halign="center",
+                valign="middle",
+            )
+            self.indicator_lbl.bind(size=self.indicator_lbl.setter("text_size"))
+            self.add_widget(self.indicator_lbl)
+
+            # Title and Subtitle column
+            info_col = BoxLayout(orientation="vertical", spacing=dp(2), size_hint_x=1.0)
+            self.title_lbl = Label(
+                text=f"[b]{title}[/b]",
+                markup=True,
+                font_size="12sp",
+                color=(1.0, 0.85, 0.20, 1.0) if is_selected else (0.95, 0.95, 1.0, 1.0),
+                halign="left",
+                valign="middle",
+                size_hint_y=None,
+                height=dp(18),
+            )
+            self.title_lbl.bind(size=self.title_lbl.setter("text_size"))
+            info_col.add_widget(self.title_lbl)
+
+            self.sub_lbl = Label(
+                text=subtitle,
+                font_size="10sp",
+                color=(0.65, 0.70, 0.82, 1.0),
+                halign="left",
+                valign="middle",
+                size_hint_y=None,
+                height=dp(16),
+            )
+            self.sub_lbl.bind(size=self.sub_lbl.setter("text_size"))
+            info_col.add_widget(self.sub_lbl)
+            self.add_widget(info_col)
+
+            # Optional badge
+            if badge_text:
+                is_gold = "1080p" in badge_text or "MP3" in badge_text or "PLAYLIST" in badge_text
+                badge_bg = (0.28, 0.20, 0.08, 1.0) if is_gold else (0.13, 0.18, 0.28, 1.0)
+                badge_fg = (1.0, 0.80, 0.20, 1.0) if is_gold else (0.40, 0.82, 1.0, 1.0)
+                badge_card = StyledCard(
+                    size_hint=(None, None),
+                    size=(dp(68), dp(24)),
+                    bg_color=badge_bg,
+                    radius=6,
+                    pos_hint={"center_y": 0.5},
+                )
+                badge_lbl = Label(
+                    text=badge_text,
+                    font_size="9.5sp",
+                    bold=True,
+                    color=badge_fg,
+                    halign="center",
+                    valign="middle",
+                )
+                badge_lbl.bind(size=badge_lbl.setter("text_size"))
+                badge_card.add_widget(badge_lbl)
+                self.add_widget(badge_card)
+
+            self.bind(on_press=self._on_pressed)
+
+        def _update_geom(self, *args):
+            self._rect_instr.pos = self.pos
+            self._rect_instr.size = self.size
+
+        def set_selected(self, selected: bool):
+            self.is_selected = selected
+            if selected:
+                self._col_instr.rgba = (0.22, 0.28, 0.44, 1.0)
+                self.indicator_lbl.text = "[b][color=#FFB300]●[/color][/b]"
+                self.title_lbl.color = (1.0, 0.85, 0.20, 1.0)
+            else:
+                self._col_instr.rgba = (0.11, 0.13, 0.20, 1.0)
+                self.indicator_lbl.text = "[color=#607D8B]○[/color]"
+                self.title_lbl.color = (0.95, 0.95, 1.0, 1.0)
+
+        def _on_pressed(self, *args):
+            if self.on_select_cb:
+                self.on_select_cb(self.key)
+
+
     class MSKDownloaderMobile(App):
         def build(self):
             self.title = "MSK YTDL"
@@ -890,10 +1049,25 @@ if KIVY_AVAILABLE:
 
             self.notification_manager = AndroidNotificationManager()
             self.current_preview_url = ""
+            self.current_preview_info: Optional[Dict[str, Any]] = None
             self.last_clipboard_text = ""
             self.last_notif_time = 0.0
             self.active_tab = "home"
             self.active_filter = "all"
+
+            # Default quality spinner for preferences
+            self.quality_spinner = Spinner(
+                text="Video (Max Quality - 1080p / 720p HD)",
+                values=(
+                    "Video (Max Quality - 1080p / 720p HD)",
+                    "Video (720p HD MP4)",
+                    "Video (360p Fast MP4)",
+                    "Audio Only (HQ MP3 Music + Album Art)",
+                    "Audio Only (M4A AAC Fast)",
+                ),
+                size_hint_y=None,
+                height=dp(42),
+            )
 
             # Request Android storage & notification permissions on startup
             request_android_permissions()
@@ -937,6 +1111,7 @@ if KIVY_AVAILABLE:
             # Initial startup tasks
             Clock.schedule_once(self.check_initial_intent, 0.4)
             Clock.schedule_once(lambda dt: self.refresh_library(), 0.6)
+            Clock.schedule_once(lambda dt: self.populate_home_recommendations(), 0.5)
             Clock.schedule_interval(self.check_clipboard, 2.5)
 
             return root
@@ -1218,7 +1393,7 @@ if KIVY_AVAILABLE:
             scroll = ScrollView(do_scroll_x=False, do_scroll_y=True)
             content = BoxLayout(
                 orientation="vertical",
-                padding=[dp(14), dp(10), dp(14), dp(16)],
+                padding=[dp(12), dp(10), dp(12), dp(24)],
                 spacing=dp(10),
                 size_hint_y=None,
             )
@@ -1238,20 +1413,20 @@ if KIVY_AVAILABLE:
             self.clipboard_banner.bind(on_press=self.on_clipboard_banner_clicked)
             content.add_widget(self.clipboard_banner)
 
-            # URL Input Card with PASTE and CLEAR Buttons
+            # Unified Input Card: Video/Playlist Link or Search Query
             input_card = StyledCard(
                 orientation="vertical",
-                padding=[dp(14), dp(12)],
+                padding=[dp(12), dp(10)],
                 spacing=dp(8),
                 size_hint_y=None,
-                height=dp(138),
+                height=dp(136),
                 bg_color=(0.09, 0.11, 0.17, 1.0),
             )
             input_title = Label(
-                text="[b]YouTube Video or Playlist Link[/b]",
+                text="[b]Search Video, Playlist, or Paste Link[/b]",
                 markup=True,
                 font_size="13sp",
-                color=(0.9, 0.9, 0.95, 1.0),
+                color=(0.95, 0.95, 1.0, 1.0),
                 size_hint_y=None,
                 height=dp(20),
                 halign="left",
@@ -1260,9 +1435,9 @@ if KIVY_AVAILABLE:
             input_card.add_widget(input_title)
 
             self.url_input = TextInput(
-                hint_text="Paste YouTube link here or tap Share in YouTube...",
+                hint_text="Search YouTube or paste video/playlist link...",
                 multiline=False,
-                font_size="13.5sp",
+                font_size="13sp",
                 size_hint_y=None,
                 height=dp(42),
                 background_color=(0.14, 0.16, 0.24, 1.0),
@@ -1271,34 +1446,45 @@ if KIVY_AVAILABLE:
                 padding=[dp(10), dp(10)],
             )
             self.url_input.bind(text=self.on_url_input_changed)
+            self.url_input.bind(on_text_validate=self.on_home_search_validate)
             input_card.add_widget(self.url_input)
 
-            # Action Buttons Row: PASTE & CLEAR with crisp PNG icons
-            btn_row = BoxLayout(orientation="horizontal", spacing=dp(10), size_hint_y=None, height=dp(38))
+            # Action Buttons Row: [PASTE] [SEARCH] [CLEAR]
+            btn_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(36))
             paste_btn = IconActionButton(
                 icon_path="paste.png",
-                text="PASTE LINK",
+                text="PASTE",
                 bg_color=(0.20, 0.26, 0.40, 1.0),
                 text_color=(1, 0.75, 0, 1),
-                font_size="12sp",
+                font_size="11.5sp",
             )
             paste_btn.bind(on_press=self.on_paste_clicked)
+
+            home_search_btn = IconActionButton(
+                icon_path="search.png",
+                text="SEARCH",
+                bg_color=(1.0, 0.68, 0.0, 1.0),
+                text_color=(0.04, 0.05, 0.08, 1.0),
+                font_size="11.5sp",
+            )
+            home_search_btn.bind(on_press=lambda ins: self.on_home_search_clicked())
 
             clear_btn = IconActionButton(
                 icon_path="clear.png",
                 text="CLEAR",
                 bg_color=(0.18, 0.20, 0.28, 1.0),
-                text_color=(0.8, 0.85, 0.95, 1),
-                font_size="12sp",
+                text_color=(0.80, 0.85, 0.95, 1.0),
+                font_size="11.5sp",
             )
             clear_btn.bind(on_press=self.on_clear_clicked)
 
             btn_row.add_widget(paste_btn)
+            btn_row.add_widget(home_search_btn)
             btn_row.add_widget(clear_btn)
             input_card.add_widget(btn_row)
             content.add_widget(input_card)
 
-            # Real-Time Video Preview Card
+            # Active Media Preview Card
             self.preview_card = StyledCard(
                 orientation="horizontal",
                 padding=[dp(10), dp(8)],
@@ -1310,7 +1496,7 @@ if KIVY_AVAILABLE:
             )
             self.preview_thumb = AsyncImage(
                 size_hint=(None, None),
-                size=(dp(104), dp(60)),
+                size=(dp(96), dp(62)),
                 allow_stretch=True,
                 keep_ratio=True,
             )
@@ -1326,7 +1512,7 @@ if KIVY_AVAILABLE:
                 halign="left",
                 valign="top",
                 size_hint_y=None,
-                height=dp(36),
+                height=dp(34),
             )
             self.preview_title.bind(size=self.preview_title.setter("text_size"))
             preview_info_col.add_widget(self.preview_title)
@@ -1334,7 +1520,7 @@ if KIVY_AVAILABLE:
             self.preview_meta = Label(
                 text="Channel • Duration",
                 markup=True,
-                font_size="11sp",
+                font_size="10.5sp",
                 color=(0.7, 0.75, 0.88, 1.0),
                 halign="left",
                 valign="middle",
@@ -1343,85 +1529,128 @@ if KIVY_AVAILABLE:
             )
             self.preview_meta.bind(size=self.preview_meta.setter("text_size"))
             preview_info_col.add_widget(self.preview_meta)
-
             self.preview_card.add_widget(preview_info_col)
+
+            # Preview actions: [PLAY] and [GET]
+            preview_btn_col = BoxLayout(orientation="vertical", spacing=dp(4), size_hint=(None, None), size=(dp(68), dp(62)))
+            prev_play_btn = IconActionButton(
+                icon_path="play.png",
+                text="PLAY",
+                bg_color=(0.18, 0.24, 0.38, 1.0),
+                text_color=(0.40, 0.85, 1.0, 1.0),
+                font_size="10.5sp",
+                size_hint_y=0.5,
+            )
+            prev_play_btn.bind(
+                on_press=lambda ins: self.open_video_player_modal(
+                    self.current_preview_info or {"url": self.url_input.text, "title": self.preview_title.text}
+                )
+            )
+
+            prev_dl_btn = IconActionButton(
+                icon_path="download_arrow.png",
+                text="GET",
+                bg_color=(1.0, 0.68, 0.0, 1.0),
+                text_color=(0.04, 0.05, 0.08, 1.0),
+                font_size="10.5sp",
+                size_hint_y=0.5,
+            )
+            prev_dl_btn.bind(on_press=lambda ins: self.open_download_modal(self.current_preview_info))
+
+            preview_btn_col.add_widget(prev_play_btn)
+            preview_btn_col.add_widget(prev_dl_btn)
+            self.preview_card.add_widget(preview_btn_col)
             content.add_widget(self.preview_card)
-
-            # Format & Quality Selector Card
-            format_card = StyledCard(
-                orientation="vertical",
-                padding=[dp(14), dp(12)],
-                spacing=dp(6),
-                size_hint_y=None,
-                height=dp(92),
-                bg_color=(0.09, 0.11, 0.17, 1.0),
-            )
-            format_title = Label(
-                text="[b]Select Format & Quality[/b]",
-                markup=True,
-                font_size="13sp",
-                color=(0.9, 0.9, 0.95, 1.0),
-                size_hint_y=None,
-                height=dp(20),
-                halign="left",
-            )
-            format_title.bind(size=format_title.setter("text_size"))
-            format_card.add_widget(format_title)
-
-            self.quality_spinner = Spinner(
-                text="Video (Max Quality - 1080p / 720p HD)",
-                values=(
-                    "Video (Max Quality - 1080p / 720p HD)",
-                    "Video (720p HD MP4)",
-                    "Video (360p Fast MP4)",
-                    "Audio Only (HQ MP3 Music + Album Art)",
-                    "Audio Only (M4A AAC Fast)",
-                ),
-                size_hint_y=None,
-                height=dp(42),
-                background_color=(0.16, 0.19, 0.28, 1.0),
-                color=(1, 1, 1, 1),
-                font_size="13sp",
-            )
-            format_card.add_widget(self.quality_spinner)
-            content.add_widget(format_card)
 
             # Status & Progress Card
             status_card = StyledCard(
                 orientation="vertical",
-                padding=[dp(14), dp(12)],
-                spacing=dp(8),
+                padding=[dp(12), dp(10)],
+                spacing=dp(6),
                 size_hint_y=None,
-                height=dp(78),
+                height=dp(72),
                 bg_color=(0.08, 0.10, 0.16, 1.0),
             )
             self.progress_bar = ProgressBar(
                 max=100,
                 value=0,
                 size_hint_y=None,
-                height=dp(10),
+                height=dp(8),
             )
             status_card.add_widget(self.progress_bar)
 
             self.status_label = Label(
-                text="Ready. Paste a link or tap 'Share' from YouTube.",
+                text="Ready. Paste video/playlist link or search above.",
                 markup=True,
-                font_size="12sp",
+                font_size="11.5sp",
                 color=(0.8, 0.85, 0.92, 1.0),
                 size_hint_y=None,
-                height=dp(28),
+                height=dp(26),
                 halign="center",
             )
             self.status_label.bind(size=self.status_label.setter("text_size"))
             status_card.add_widget(self.status_label)
             content.add_widget(status_card)
 
-            # Prominent DOWNLOAD NOW Action Button with animated arrow icon
+            # Prominent DOWNLOAD NOW Action Button (Opens download pop-up)
             self.download_btn = DownloadActionButton()
-            self.download_btn.bind(on_press=self.start_download)
+            self.download_btn.bind(on_press=self.on_main_download_clicked)
             content.add_widget(self.download_btn)
 
-            # Storage Destination Card
+            # Category Chips (Horizontal scrollable chips)
+            chip_scroll = ScrollView(do_scroll_x=True, do_scroll_y=False, size_hint_y=None, height=dp(34))
+            chip_box = BoxLayout(orientation="horizontal", spacing=dp(6), size_hint_x=None)
+            chip_box.bind(minimum_width=chip_box.setter("width"))
+
+            self.home_category_chips = {}
+            categories = [
+                ("TRENDING", "Trending Videos 2026"),
+                ("MUSIC", "Top Music Hits 2026"),
+                ("GAMING", "Trending Gaming Highlights"),
+                ("TECH", "Latest Tech & AI News"),
+                ("SHORTS", "Popular YouTube Shorts"),
+                ("LO-FI", "Relaxing LoFi Beats Chill"),
+            ]
+            for cat_name, cat_query in categories:
+                btn = Button(
+                    text=cat_name,
+                    font_size="10.5sp",
+                    bold=True,
+                    size_hint=(None, None),
+                    size=(dp(82), dp(32)),
+                    background_color=(0.13, 0.16, 0.23, 1.0),
+                    color=(0.75, 0.80, 0.90, 1.0),
+                )
+                btn.bind(on_press=lambda ins, q=cat_query, n=cat_name: self.on_home_category_chip_clicked(n, q))
+                self.home_category_chips[cat_name] = btn
+                chip_box.add_widget(btn)
+
+            chip_scroll.add_widget(chip_box)
+            content.add_widget(chip_scroll)
+
+            # Results Section Header
+            self.home_results_header_lbl = Label(
+                text="[b]Trending & Recommended[/b]",
+                markup=True,
+                font_size="13sp",
+                color=(0.95, 0.95, 1.0, 1.0),
+                size_hint_y=None,
+                height=dp(22),
+                halign="left",
+            )
+            self.home_results_header_lbl.bind(size=self.home_results_header_lbl.setter("text_size"))
+            content.add_widget(self.home_results_header_lbl)
+
+            # Dynamic Video Results Container on Home
+            self.home_recommendations_container = BoxLayout(
+                orientation="vertical",
+                spacing=dp(10),
+                size_hint_y=None,
+            )
+            self.home_recommendations_container.bind(minimum_height=self.home_recommendations_container.setter("height"))
+            content.add_widget(self.home_recommendations_container)
+
+            # Storage Destination Note
             dest_card = StyledCard(
                 orientation="horizontal",
                 padding=[dp(12), dp(6)],
@@ -1857,14 +2086,14 @@ if KIVY_AVAILABLE:
             for item in results:
                 self.add_video_result_card(item)
 
-        def add_video_result_card(self, item: Dict[str, Any]):
-            """Create a video recommendation card with safe thumbnail and 1-tap GET button."""
+        def add_video_result_card(self, item: Dict[str, Any], container: Optional[BoxLayout] = None):
+            """Create a video card with safe thumbnail, in-app PLAY modal, and 1-tap GET/Download popup."""
             card = StyledCard(
                 orientation="horizontal",
                 padding=[dp(10), dp(8)],
                 spacing=dp(10),
                 size_hint_y=None,
-                height=dp(86),
+                height=dp(88),
                 bg_color=(0.10, 0.12, 0.18, 1.0),
             )
 
@@ -1873,7 +2102,7 @@ if KIVY_AVAILABLE:
             thumb = AsyncImage(
                 source=thumb_url,
                 size_hint=(None, None),
-                size=(dp(96), dp(62)),
+                size=(dp(96), dp(64)),
                 allow_stretch=True,
                 keep_ratio=True,
             )
@@ -1917,20 +2146,35 @@ if KIVY_AVAILABLE:
             info_col.add_widget(meta_lbl)
             card.add_widget(info_col)
 
-            # 1-Tap GET Button with download icon
+            # Action Buttons Column: [PLAY] and [GET]
+            btn_col = BoxLayout(orientation="vertical", spacing=dp(4), size_hint=(None, None), size=(dp(68), dp(68)))
+
+            play_btn = IconActionButton(
+                icon_path="play.png",
+                text="PLAY",
+                font_size="10.5sp",
+                size_hint_y=0.5,
+                bg_color=(0.18, 0.24, 0.38, 1.0),
+                text_color=(0.40, 0.85, 1.0, 1.0),
+            )
+            play_btn.bind(on_press=lambda ins, it=item: self.open_video_player_modal(it))
+            btn_col.add_widget(play_btn)
+
             dl_btn = IconActionButton(
                 icon_path="download_arrow.png",
                 text="GET",
-                font_size="11sp",
-                size_hint=(None, None),
-                size=(dp(68), dp(38)),
+                font_size="10.5sp",
+                size_hint_y=0.5,
                 bg_color=(1.0, 0.68, 0.0, 1.0),
                 text_color=(0.04, 0.05, 0.08, 1.0),
             )
-            dl_btn.bind(on_press=lambda ins, u=item["url"]: self.load_recommended_video(u))
-            card.add_widget(dl_btn)
+            dl_btn.bind(on_press=lambda ins, it=item: self.open_download_modal(it))
+            btn_col.add_widget(dl_btn)
 
-            self.recommendations_container.add_widget(card)
+            card.add_widget(btn_col)
+
+            target_container = container if container is not None else self.recommendations_container
+            target_container.add_widget(card)
 
         @mainthread
         def populate_recommendations(self):
@@ -1995,11 +2239,600 @@ if KIVY_AVAILABLE:
                 self.add_video_result_card(item)
 
         def load_recommended_video(self, video_url: str):
-            """Load a video from search/recommendations into Home tab with live preview."""
+            """Load a video from search/recommendations into Home tab with live preview and modal."""
             self.url_input.text = video_url
             self.switch_tab("home")
-            self.fetch_preview(video_url)
-            self.update_status("[color=#FFB300]Loaded from Videos![/color] Tap DOWNLOAD NOW.", 0)
+            self.fetch_preview(video_url, auto_open_modal=True)
+            self.update_status("[color=#FFB300]Loaded video![/color] Select format to download.", 0)
+
+        # -----------------------------------------------------------------
+        # Home Page Search & Recommendations Logic
+        # -----------------------------------------------------------------
+        def on_main_download_clicked(self, instance):
+            """Trigger download options modal for currently entered URL or active preview."""
+            url = self.url_input.text.strip()
+            if not url:
+                self.update_status("[color=#FF5252]Paste a YouTube link or search first![/color]", 0)
+                return
+            normalized = normalize_youtube_url(url)
+            if not normalized:
+                self.search_youtube_home(url)
+                return
+            if hasattr(self, "current_preview_info") and self.current_preview_info and self.current_preview_info.get("url") == normalized:
+                self.open_download_modal(self.current_preview_info)
+            else:
+                self.fetch_preview(normalized, auto_open_modal=True)
+
+        def on_home_search_validate(self, instance):
+            """Triggered when Enter or Search key is pressed inside Home input box."""
+            self.on_home_search_clicked()
+
+        def on_home_search_clicked(self):
+            """Handle SEARCH button click on Home page."""
+            query = self.url_input.text.strip()
+            if not query:
+                return
+            normalized = normalize_youtube_url(query)
+            if normalized:
+                self.current_preview_url = normalized
+                self.fetch_preview(normalized, auto_open_modal=True)
+            else:
+                self.search_youtube_home(query)
+
+        def on_home_category_chip_clicked(self, cat_name: str, cat_query: str):
+            """Filter Home discover feed by category chip."""
+            for name, btn in self.home_category_chips.items():
+                if name == cat_name:
+                    btn.background_color = (0.20, 0.28, 0.44, 1.0)
+                    btn.color = (1.0, 0.75, 0.0, 1.0)
+                else:
+                    btn.background_color = (0.13, 0.16, 0.23, 1.0)
+                    btn.color = (0.75, 0.80, 0.90, 1.0)
+            self.url_input.text = cat_query
+            self.search_youtube_home(cat_query, section_title=f"{cat_name} Picks")
+
+        def search_youtube_home(self, query: str, section_title: Optional[str] = None):
+            """Search YouTube and display cards directly on Home page."""
+            title = section_title or f"Results for: {query[:25]}"
+            self.home_results_header_lbl.text = f"[b]{title}[/b]"
+            self.home_recommendations_container.clear_widgets()
+
+            loading_card = StyledCard(
+                orientation="vertical",
+                padding=[dp(16), dp(14)],
+                spacing=dp(6),
+                size_hint_y=None,
+                height=dp(70),
+                bg_color=(0.08, 0.10, 0.15, 1.0),
+            )
+            loading_lbl = Label(
+                text=f"Searching YouTube for \"{query[:28]}\"...\nPlease wait.",
+                font_size="12sp",
+                color=(1.0, 0.75, 0.0, 1.0),
+                halign="center",
+            )
+            loading_lbl.bind(size=loading_lbl.setter("text_size"))
+            loading_card.add_widget(loading_lbl)
+            self.home_recommendations_container.add_widget(loading_card)
+
+            def worker():
+                results = []
+                try:
+                    import yt_dlp
+                    safe_logger = AndroidYTDLLogger()
+                    ydl_opts = {
+                        "extract_flat": True,
+                        "skip_download": True,
+                        "logger": safe_logger,
+                        "quiet": True,
+                        "no_warnings": True,
+                        "socket_timeout": 15,
+                    }
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        res = ydl.extract_info(f"ytsearch10:{query}", download=False)
+                        if res and "entries" in res:
+                            for entry in res["entries"]:
+                                if not entry:
+                                    continue
+                                vid_id = entry.get("id")
+                                vid_title = entry.get("title") or "YouTube Video"
+                                vid_uploader = entry.get("uploader") or entry.get("channel") or "YouTube"
+                                dur_sec = entry.get("duration")
+                                vid_duration = format_duration(dur_sec) if dur_sec else "Video"
+                                vid_thumb = entry.get("thumbnail") or (
+                                    f"https://i.ytimg.com/vi/{vid_id}/mqdefault.jpg" if vid_id else ""
+                                )
+                                vid_url = entry.get("url") or entry.get("webpage_url") or (
+                                    f"https://www.youtube.com/watch?v={vid_id}" if vid_id else ""
+                                )
+                                results.append({
+                                    "title": vid_title,
+                                    "channel": vid_uploader,
+                                    "duration": vid_duration,
+                                    "url": vid_url,
+                                    "thumb": vid_thumb,
+                                    "category": "YouTube",
+                                })
+                except Exception as e:
+                    print(f"[Home Search] YouTube search error: {e}")
+
+                Clock.schedule_once(lambda dt, r=results, q=query: self.render_home_video_results(r, q))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        @mainthread
+        def render_home_video_results(self, results: List[Dict[str, Any]], query: str):
+            """Display live search results on Home page."""
+            self.home_recommendations_container.clear_widgets()
+            if not results:
+                empty_card = StyledCard(
+                    orientation="vertical",
+                    padding=[dp(16), dp(16)],
+                    spacing=dp(6),
+                    size_hint_y=None,
+                    height=dp(80),
+                    bg_color=(0.08, 0.10, 0.15, 1.0),
+                )
+                empty_lbl = Label(
+                    text=f"No results found for \"{query[:25]}\".\nCheck connection or try another search term.",
+                    font_size="11.5sp",
+                    color=(0.70, 0.75, 0.85, 1.0),
+                    halign="center",
+                )
+                empty_lbl.bind(size=empty_lbl.setter("text_size"))
+                empty_card.add_widget(empty_lbl)
+                self.home_recommendations_container.add_widget(empty_card)
+                return
+
+            for item in results:
+                self.add_video_result_card(item, container=self.home_recommendations_container)
+
+        @mainthread
+        def populate_home_recommendations(self):
+            """Populate curated and trending picks on Home page."""
+            if not hasattr(self, "home_recommendations_container"):
+                return
+            self.home_results_header_lbl.text = "[b]Trending & Recommended[/b]"
+            self.home_recommendations_container.clear_widgets()
+
+            catalog = [
+                {
+                    "title": "Alan Walker - Faded (Official Music Video)",
+                    "channel": "Alan Walker",
+                    "duration": "3:32",
+                    "url": "https://www.youtube.com/watch?v=60ItHLz5WEA",
+                    "thumb": "https://i.ytimg.com/vi/60ItHLz5WEA/mqdefault.jpg",
+                    "category": "Music HQ",
+                },
+                {
+                    "title": "Python Programming Full Course for Beginners",
+                    "channel": "freeCodeCamp",
+                    "duration": "4:26:52",
+                    "url": "https://www.youtube.com/watch?v=_uQrJ0TkZlc",
+                    "thumb": "https://i.ytimg.com/vi/_uQrJ0TkZlc/mqdefault.jpg",
+                    "category": "Coding & Tech",
+                },
+                {
+                    "title": "Alan Walker - The Spectre (NCS Official)",
+                    "channel": "NoCopyrightSounds",
+                    "duration": "3:13",
+                    "url": "https://www.youtube.com/watch?v=AOeY-nDp7hI",
+                    "thumb": "https://i.ytimg.com/vi/AOeY-nDp7hI/mqdefault.jpg",
+                    "category": "Gaming Music",
+                },
+                {
+                    "title": "How to Create AI Movies & Animation with Free Tools",
+                    "channel": "AI Creators",
+                    "duration": "14:48",
+                    "url": "https://www.youtube.com/watch?v=aircAruvnKk",
+                    "thumb": "https://i.ytimg.com/vi/aircAruvnKk/mqdefault.jpg",
+                    "category": "Tech & AI",
+                },
+                {
+                    "title": "Ed Sheeran - Shape of You (Official Music Video)",
+                    "channel": "Ed Sheeran",
+                    "duration": "4:23",
+                    "url": "https://www.youtube.com/watch?v=JGwWNGJdvx8",
+                    "thumb": "https://i.ytimg.com/vi/JGwWNGJdvx8/mqdefault.jpg",
+                    "category": "Pop Music",
+                },
+                {
+                    "title": "1,000 Termites vs. House (Full Documentary)",
+                    "channel": "AntsCanada",
+                    "duration": "12:13",
+                    "url": "https://www.youtube.com/watch?v=UqmP868N59w",
+                    "thumb": "https://i.ytimg.com/vi/UqmP868N59w/mqdefault.jpg",
+                    "category": "Documentary",
+                },
+            ]
+            import random
+            random.shuffle(catalog)
+            for item in catalog:
+                self.add_video_result_card(item, container=self.home_recommendations_container)
+
+        # -----------------------------------------------------------------
+        # In-App Video Player & Download Options Modals
+        # -----------------------------------------------------------------
+        def open_video_player_modal(self, media_item: Optional[Dict[str, Any]] = None):
+            """
+            In-App Video Player modal allowing video preview and instant launch in YouTube Player.
+            """
+            if not media_item:
+                return
+
+            modal = ModalView(size_hint=(0.94, None), height=dp(420), auto_dismiss=True)
+            content = StyledCard(
+                orientation="vertical",
+                padding=[dp(14), dp(12)],
+                spacing=dp(10),
+                bg_color=(0.08, 0.10, 0.16, 0.98),
+                radius=16,
+            )
+
+            # Header row: Icon + Title + Close [X]
+            header_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(30))
+            play_icon_path = get_asset_icon("play.png")
+            if play_icon_path:
+                header_row.add_widget(
+                    Image(source=play_icon_path, size_hint=(None, None), size=(dp(22), dp(22)), allow_stretch=True, keep_ratio=True)
+                )
+            player_title = Label(
+                text="[b]YouTube Video Player[/b]",
+                markup=True,
+                font_size="14sp",
+                color=(1.0, 0.75, 0.0, 1.0),
+                halign="left",
+                valign="middle",
+                size_hint_x=1.0,
+            )
+            player_title.bind(size=player_title.setter("text_size"))
+            header_row.add_widget(player_title)
+
+            close_x = Button(
+                text="✕",
+                font_size="16sp",
+                bold=True,
+                size_hint=(None, None),
+                size=(dp(30), dp(30)),
+                background_color=(0.20, 0.22, 0.30, 1.0),
+                color=(1, 1, 1, 1),
+            )
+            close_x.bind(on_press=modal.dismiss)
+            header_row.add_widget(close_x)
+            content.add_widget(header_row)
+
+            # Thumbnail & Player Display Box (Tap to play)
+            player_box = BoxLayout(
+                orientation="vertical",
+                size_hint_y=None,
+                height=dp(170),
+            )
+            thumb_url = media_item.get("thumb") or ""
+            thumb_img = AsyncImage(
+                source=thumb_url,
+                size_hint=(1.0, 1.0),
+                allow_stretch=True,
+                keep_ratio=True,
+            )
+            def on_pthumb_error(instance, *args):
+                for candidate in ("icon.png", "assets/logo.png"):
+                    if os.path.exists(candidate):
+                        instance.source = candidate
+                        break
+                instance.opacity = 0.7
+            thumb_img.bind(on_error=on_pthumb_error)
+            player_box.add_widget(thumb_img)
+            content.add_widget(player_box)
+
+            # Video Title & Details
+            raw_title = media_item.get("title") or "YouTube Video"
+            clean_title = safe_display_text(raw_title)
+            t_lbl = Label(
+                text=f"[b]{clean_title[:65]}[/b]",
+                markup=True,
+                font_size="12.5sp",
+                color=(1.0, 1.0, 1.0, 1.0),
+                halign="left",
+                valign="top",
+                size_hint_y=None,
+                height=dp(34),
+            )
+            t_lbl.bind(size=t_lbl.setter("text_size"))
+            content.add_widget(t_lbl)
+
+            channel_name = safe_display_text(media_item.get("channel", "YouTube"))
+            dur_str = media_item.get("duration", "Video")
+            meta_lbl = Label(
+                text=f"[color=#FFB300]Duration:[/color] {dur_str}   •   [color=#81D4FA]{channel_name[:25]}[/color]",
+                markup=True,
+                font_size="11sp",
+                halign="left",
+                valign="middle",
+                size_hint_y=None,
+                height=dp(18),
+            )
+            meta_lbl.bind(size=meta_lbl.setter("text_size"))
+            content.add_widget(meta_lbl)
+
+            # Player Action Buttons: [▶ WATCH IN YOUTUBE APP] + [⬇ DOWNLOAD]
+            btn_col = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None, height=dp(88))
+
+            watch_btn = IconActionButton(
+                icon_path="play.png",
+                text="WATCH IN YOUTUBE (FULL QUALITY)",
+                bg_color=(0.85, 0.15, 0.15, 1.0),
+                text_color=(1, 1, 1, 1),
+                font_size="12sp",
+                size_hint_y=None,
+                height=dp(40),
+            )
+            watch_btn.bind(on_press=lambda ins, u=media_item["url"]: play_online_video(u))
+            btn_col.add_widget(watch_btn)
+
+            dl_action_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(38))
+            dl_opts_btn = IconActionButton(
+                icon_path="download_arrow.png",
+                text="DOWNLOAD OPTIONS",
+                bg_color=(1.0, 0.68, 0.0, 1.0),
+                text_color=(0.05, 0.07, 0.12, 1.0),
+                font_size="11.5sp",
+                size_hint_x=0.7,
+            )
+            def on_dl_from_player(ins):
+                modal.dismiss()
+                self.open_download_modal(media_item)
+            dl_opts_btn.bind(on_press=on_dl_from_player)
+            dl_action_row.add_widget(dl_opts_btn)
+
+            close_btn = IconActionButton(
+                icon_path="clear.png",
+                text="CLOSE",
+                bg_color=(0.18, 0.20, 0.28, 1.0),
+                text_color=(0.80, 0.85, 0.95, 1.0),
+                font_size="11.5sp",
+                size_hint_x=0.3,
+            )
+            close_btn.bind(on_press=modal.dismiss)
+            dl_action_row.add_widget(close_btn)
+
+            btn_col.add_widget(dl_action_row)
+            content.add_widget(btn_col)
+
+            modal.add_widget(content)
+            modal.open()
+
+        def open_download_modal(self, media_item: Optional[Dict[str, Any]] = None):
+            """
+            Open interactive Download Pop-up Modal allowing format and audio/video selection.
+            Defaults to 1080p Full HD MP4.
+            """
+            if not media_item:
+                if hasattr(self, "current_preview_info") and self.current_preview_info:
+                    media_item = dict(self.current_preview_info)
+                else:
+                    url = self.url_input.text.strip()
+                    if not url:
+                        self.update_status("[color=#FF5252]Paste a YouTube link or search first![/color]", 0)
+                        return
+                    media_item = {
+                        "title": "YouTube Media",
+                        "url": normalize_youtube_url(url) or url,
+                        "thumb": "",
+                        "channel": "YouTube",
+                        "duration": "Media",
+                        "is_playlist": "playlist" in url.lower() or "list=" in url.lower(),
+                        "count": 1,
+                    }
+
+            is_plist = bool(media_item.get("is_playlist", False) or "playlist" in media_item.get("url", "").lower() or "list=" in media_item.get("url", "").lower())
+            count = media_item.get("count", 1)
+
+            modal = ModalView(size_hint=(0.94, 0.84), auto_dismiss=True)
+            content = StyledCard(
+                orientation="vertical",
+                padding=[dp(14), dp(12)],
+                spacing=dp(10),
+                bg_color=(0.08, 0.10, 0.16, 0.98),
+                radius=16,
+            )
+
+            # Header Row
+            header_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(30))
+            dl_icon_path = get_asset_icon("download_arrow.png")
+            if dl_icon_path:
+                header_row.add_widget(
+                    Image(source=dl_icon_path, size_hint=(None, None), size=(dp(22), dp(22)), allow_stretch=True, keep_ratio=True)
+                )
+            m_title = Label(
+                text="[b]Select Download Format[/b]" if not is_plist else f"[b]Download Playlist ({count} Videos)[/b]",
+                markup=True,
+                font_size="14sp",
+                color=(1.0, 0.75, 0.0, 1.0),
+                halign="left",
+                valign="middle",
+                size_hint_x=1.0,
+            )
+            m_title.bind(size=m_title.setter("text_size"))
+            header_row.add_widget(m_title)
+
+            close_x = Button(
+                text="✕",
+                font_size="16sp",
+                bold=True,
+                size_hint=(None, None),
+                size=(dp(30), dp(30)),
+                background_color=(0.20, 0.22, 0.30, 1.0),
+                color=(1, 1, 1, 1),
+            )
+            close_x.bind(on_press=modal.dismiss)
+            header_row.add_widget(close_x)
+            content.add_widget(header_row)
+
+            # Media Info Mini Card
+            mini_card = StyledCard(
+                orientation="horizontal",
+                padding=[dp(8), dp(6)],
+                spacing=dp(8),
+                size_hint_y=None,
+                height=dp(58),
+                bg_color=(0.11, 0.14, 0.22, 1.0),
+            )
+            m_thumb = AsyncImage(
+                source=media_item.get("thumb") or "",
+                size_hint=(None, None),
+                size=(dp(76), dp(46)),
+                allow_stretch=True,
+                keep_ratio=True,
+            )
+            def on_mthumb_error(ins, *args):
+                for candidate in ("icon.png", "assets/logo.png"):
+                    if os.path.exists(candidate):
+                        ins.source = candidate
+                        break
+            m_thumb.bind(on_error=on_mthumb_error)
+            mini_card.add_widget(m_thumb)
+
+            minfo_col = BoxLayout(orientation="vertical", spacing=dp(2), size_hint_x=1.0)
+            raw_t = media_item.get("title") or "YouTube Media"
+            m_tlbl = Label(
+                text=f"[b]{safe_display_text(raw_t)[:48]}[/b]",
+                markup=True,
+                font_size="11.5sp",
+                color=(1, 1, 1, 1),
+                halign="left",
+                valign="top",
+                size_hint_y=None,
+                height=dp(26),
+            )
+            m_tlbl.bind(size=m_tlbl.setter("text_size"))
+            minfo_col.add_widget(m_tlbl)
+
+            uploader_str = safe_display_text(media_item.get("channel") or media_item.get("uploader") or "YouTube")
+            type_tag = f"[color=#FFB300]PLAYLIST ({count} videos)[/color]" if is_plist else f"[color=#38BDF8]VIDEO[/color] • {media_item.get('duration', 'Media')}"
+            m_sublbl = Label(
+                text=f"{type_tag} • {uploader_str[:22]}",
+                markup=True,
+                font_size="10sp",
+                halign="left",
+                valign="middle",
+                size_hint_y=None,
+                height=dp(16),
+            )
+            m_sublbl.bind(size=m_sublbl.setter("text_size"))
+            minfo_col.add_widget(m_sublbl)
+            mini_card.add_widget(minfo_col)
+            content.add_widget(mini_card)
+
+            # Scrollable Options List
+            scroll = ScrollView(do_scroll_x=False, do_scroll_y=True, size_hint_y=1.0)
+            opts_box = BoxLayout(orientation="vertical", spacing=dp(6), size_hint_y=None)
+            opts_box.bind(minimum_height=opts_box.setter("height"))
+
+            selected_state = {"format": "Video (Max Quality - 1080p / 720p HD)"}
+            option_cards: Dict[str, Any] = {}
+
+            def on_option_picked(key):
+                selected_state["format"] = key
+                for k, c in option_cards.items():
+                    c.set_selected(k == key)
+
+            if is_plist:
+                plist_options = [
+                    ("Video (Max Quality - 1080p / 720p HD)", "Playlist: 1080p Full HD Video", f"Download all {count} videos in crystal clear 1080p HD", "1080p HD"),
+                    ("Video (720p HD MP4)", "Playlist: 720p HD MP4", f"Download all {count} videos in standard 720p HD", "720p HD"),
+                    ("Video (360p Fast MP4)", "Playlist: 360p Fast Video", f"Fast download for all {count} videos (Data Saver)", "360p"),
+                    ("Audio Only (HQ MP3 Music + Album Art)", "Playlist: HQ MP3 (320kbps Music)", f"Extract all {count} tracks as HQ MP3 with cover art & tags", "MP3 320k"),
+                    ("Audio Only (M4A AAC Fast)", "Playlist: M4A AAC Fast Audio", f"Fast download for all {count} audio streams", "M4A AAC"),
+                ]
+                for key, title, sub, badge in plist_options:
+                    is_sel = (key == "Video (Max Quality - 1080p / 720p HD)")
+                    c = FormatOptionCard(key, title, sub, badge, is_selected=is_sel, on_select_cb=on_option_picked)
+                    option_cards[key] = c
+                    opts_box.add_widget(c)
+            else:
+                # Video formats header
+                v_sec_lbl = Label(
+                    text="[b][color=#38BDF8]VIDEO FORMATS (MP4)[/color][/b]",
+                    markup=True,
+                    font_size="11sp",
+                    size_hint_y=None,
+                    height=dp(20),
+                    halign="left",
+                )
+                v_sec_lbl.bind(size=v_sec_lbl.setter("text_size"))
+                opts_box.add_widget(v_sec_lbl)
+
+                video_options = [
+                    ("Video (Max Quality - 1080p / 720p HD)", "1080p Full HD MP4", "Highest visual clarity (1920x1080)", "1080p HD"),
+                    ("Video (720p HD MP4)", "720p HD MP4", "High Definition MP4 (1280x720)", "720p HD"),
+                    ("Video (360p Fast MP4)", "360p Fast MP4", "Lightweight file, data saver mode", "360p"),
+                ]
+                for key, title, sub, badge in video_options:
+                    is_sel = (key == "Video (Max Quality - 1080p / 720p HD)")
+                    c = FormatOptionCard(key, title, sub, badge, is_selected=is_sel, on_select_cb=on_option_picked)
+                    option_cards[key] = c
+                    opts_box.add_widget(c)
+
+                # Audio formats header
+                a_sec_lbl = Label(
+                    text="[b][color=#FFB300]AUDIO FORMATS (MP3 / M4A)[/color][/b]",
+                    markup=True,
+                    font_size="11sp",
+                    size_hint_y=None,
+                    height=dp(22),
+                    halign="left",
+                )
+                a_sec_lbl.bind(size=a_sec_lbl.setter("text_size"))
+                opts_box.add_widget(a_sec_lbl)
+
+                audio_options = [
+                    ("Audio Only (HQ MP3 Music + Album Art)", "HQ MP3 (320kbps + Album Art)", "Studio quality music with embedded ID3 tags & cover", "MP3 320k"),
+                    ("Audio Only (M4A AAC Fast)", "M4A AAC Fast Audio", "Fast AAC audio direct stream", "M4A AAC"),
+                ]
+                for key, title, sub, badge in audio_options:
+                    c = FormatOptionCard(key, title, sub, badge, is_selected=False, on_select_cb=on_option_picked)
+                    option_cards[key] = c
+                    opts_box.add_widget(c)
+
+            scroll.add_widget(opts_box)
+            content.add_widget(scroll)
+
+            # Bottom Action Buttons
+            btn_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(42))
+
+            start_dl_btn = IconActionButton(
+                icon_path="download_arrow.png",
+                text="START DOWNLOAD",
+                bg_color=(1.0, 0.68, 0.0, 1.0),
+                text_color=(0.04, 0.05, 0.08, 1.0),
+                font_size="12sp",
+                size_hint_x=0.7,
+            )
+            def on_start_clicked(ins):
+                fmt = selected_state["format"]
+                modal.dismiss()
+                target_url = media_item.get("url")
+                if target_url:
+                    self.url_input.text = target_url
+                self.start_download(target_url=target_url, chosen_format=fmt, is_playlist=is_plist)
+
+            start_dl_btn.bind(on_press=on_start_clicked)
+            btn_row.add_widget(start_dl_btn)
+
+            cancel_btn = IconActionButton(
+                icon_path="clear.png",
+                text="CANCEL",
+                bg_color=(0.18, 0.20, 0.28, 1.0),
+                text_color=(0.80, 0.85, 0.95, 1.0),
+                font_size="12sp",
+                size_hint_x=0.3,
+            )
+            cancel_btn.bind(on_press=modal.dismiss)
+            btn_row.add_widget(cancel_btn)
+
+            content.add_widget(btn_row)
+            modal.add_widget(content)
+            modal.open()
 
         # -----------------------------------------------------------------
         # Clipboard Auto-Detect Logic
@@ -2051,12 +2884,14 @@ if KIVY_AVAILABLE:
             """Clear input, preview card, and reset status."""
             self.url_input.text = ""
             self.current_preview_url = ""
+            self.current_preview_info = None
             self.download_btn.text = "DOWNLOAD NOW"
             self.preview_card.height = 0
             self.preview_card.opacity = 0.0
             self.clipboard_banner.height = 0
             self.clipboard_banner.opacity = 0.0
-            self.update_status("Ready. Paste a link or tap 'Share' from YouTube.", 0)
+            self.update_status("Ready. Paste video/playlist link or search above.", 0)
+            self.populate_home_recommendations()
 
         def on_url_input_changed(self, instance, text):
             """Trigger real-time preview when user pastes or edits a valid YouTube link."""
@@ -2064,9 +2899,9 @@ if KIVY_AVAILABLE:
             normalized = normalize_youtube_url(clean)
             if normalized and normalized != self.current_preview_url:
                 self.current_preview_url = normalized
-                self.fetch_preview(normalized)
+                self.fetch_preview(normalized, auto_open_modal=False)
 
-        def fetch_preview(self, url: str):
+        def fetch_preview(self, url: str, auto_open_modal: bool = False):
             """Fetch video or playlist thumbnail and details in a background thread."""
             def preview_worker():
                 try:
@@ -2101,6 +2936,7 @@ if KIVY_AVAILABLE:
                             entries = [e for e in raw_entries if e]
                             count = len(entries)
                             meta_str = f"Playlist ({count} videos) • {uploader}"
+                            dur_str = f"{count} Videos"
                             if entries and not thumb:
                                 first_entry = entries[0]
                                 if first_entry:
@@ -2109,18 +2945,44 @@ if KIVY_AVAILABLE:
                                     )
                             btn_text = f"DOWNLOAD PLAYLIST ({count} VIDEOS)" if count > 1 else "DOWNLOAD NOW"
                         else:
-                            dur = format_duration(info.get("duration"))
-                            meta_str = f"{dur} • {uploader}"
+                            count = 1
+                            dur_str = format_duration(info.get("duration"))
+                            meta_str = f"{dur_str} • {uploader}"
                             btn_text = "DOWNLOAD NOW"
+
+                        self.current_preview_info = {
+                            "title": clean_title,
+                            "url": url,
+                            "thumb": thumb,
+                            "channel": uploader,
+                            "uploader": uploader,
+                            "duration": dur_str,
+                            "is_playlist": is_playlist,
+                            "count": count,
+                        }
 
                         Clock.schedule_once(
                             lambda dt, t=clean_title, m=meta_str, th=thumb, b=btn_text: self.update_preview_ui(t, m, th, b)
                         )
+                        if auto_open_modal:
+                            Clock.schedule_once(lambda dt: self.open_download_modal(self.current_preview_info), 0.2)
                 except Exception as e:
                     print(f"[Preview] Fetch notice: {e}")
+                    self.current_preview_info = {
+                        "title": "YouTube Media",
+                        "url": url,
+                        "thumb": "",
+                        "channel": "YouTube",
+                        "uploader": "YouTube",
+                        "duration": "Media",
+                        "is_playlist": "playlist" in url.lower() or "list=" in url.lower(),
+                        "count": 1,
+                    }
                     Clock.schedule_once(
                         lambda dt: self.update_preview_ui("YouTube Media", "Ready to download", "", "DOWNLOAD NOW")
                     )
+                    if auto_open_modal:
+                        Clock.schedule_once(lambda dt: self.open_download_modal(self.current_preview_info), 0.2)
 
             threading.Thread(target=preview_worker, daemon=True).start()
 
@@ -2151,7 +3013,7 @@ if KIVY_AVAILABLE:
                         self.preview_thumb.opacity = 0.6
                         break
 
-            self.preview_card.height = dp(76)
+            self.preview_card.height = dp(84)
             self.preview_card.opacity = 1.0
 
         # -----------------------------------------------------------------
@@ -2360,9 +3222,9 @@ if KIVY_AVAILABLE:
         # -----------------------------------------------------------------
         # Download Execution Logic (Strict Filename Truncation + Auto-Fallback)
         # -----------------------------------------------------------------
-        def start_download(self, instance):
+        def start_download(self, instance=None, target_url: Optional[str] = None, chosen_format: Optional[str] = None, is_playlist: Optional[bool] = None):
             """Validate inputs and launch background download thread."""
-            url = self.url_input.text.strip()
+            url = target_url or self.url_input.text.strip()
             if not url:
                 self.update_status("[color=#FF5252]Please paste a YouTube link first![/color]", 0)
                 return
@@ -2373,7 +3235,7 @@ if KIVY_AVAILABLE:
                 return
 
             url = normalized
-            selected_format = self.quality_spinner.text
+            selected_format = chosen_format or (self.quality_spinner.text if hasattr(self, "quality_spinner") else "Video (Max Quality - 1080p / 720p HD)")
             is_audio = "Audio" in selected_format
 
             self.download_btn.disabled = True
@@ -2465,7 +3327,7 @@ if KIVY_AVAILABLE:
                                 base_ydl_opts["postprocessors"] = [{
                                     "key": "FFmpegExtractAudio",
                                     "preferredcodec": "mp3",
-                                    "preferredquality": "192",
+                                    "preferredquality": "320" if "320" in selected_format else "192",
                                 }]
                             else:
                                 base_ydl_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio/18/best"
