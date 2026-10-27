@@ -224,7 +224,7 @@ def extract_youtube_url(text: str) -> Optional[str]:
 
 
 def sanitize_storage_filename(title: Optional[str], default_name: str = "MSK_Video") -> str:
-    """Sanitize title for filesystem: strip forbidden chars and preserve full readable name up to 140 chars."""
+    """Sanitize title for filesystem: strip forbidden chars and preserve full readable name up to 215 chars."""
     if not title:
         return default_name
     clean = safe_display_text(title)
@@ -233,7 +233,7 @@ def sanitize_storage_filename(title: Optional[str], default_name: str = "MSK_Vid
     clean = re.sub(r'\s+', ' ', clean).strip()
     if not clean or clean.lower() == "videoplayback":
         clean = default_name
-    return clean[:140].strip()
+    return clean[:215].strip()
 
 
 
@@ -668,9 +668,12 @@ def open_media_file(filepath: Path):
             except Exception as ge:
                 print(f"[OpenMedia] Grant permission notice: {ge}")
 
-            chooser = Intent.createChooser(intent, "Play media with...")
-            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            activity.startActivity(chooser)
+            try:
+                activity.startActivity(intent)
+            except Exception:
+                chooser = Intent.createChooser(intent, "Play media with...")
+                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                activity.startActivity(chooser)
         else:
             # Desktop fallback (Windows / macOS / Linux)
             path_str = str(filepath.resolve())
@@ -688,6 +691,41 @@ def open_media_file(filepath: Path):
                 subprocess.Popen(["xdg-open", path_str])
     except Exception as e:
         print(f"[OpenMedia] Error opening file {filepath.name}: {e}")
+
+
+def find_downloaded_media_file(title: Optional[str] = None, item_id: Optional[str] = None) -> Optional[Path]:
+    """Check if the media file has already been downloaded into the storage directory."""
+    try:
+        target_dir = get_android_download_dir()
+        if not target_dir or not target_dir.exists():
+            return None
+
+        # 1. Match by item_id (YouTube 11-char ID or platform ID)
+        if item_id and len(str(item_id)) >= 6:
+            candidates = [
+                p for p in target_dir.glob(f"*{item_id}*")
+                if p.is_file() and not p.name.endswith(".part") and not p.name.endswith(".ytdl")
+            ]
+            if candidates:
+                return candidates[0]
+
+        # 2. Match by sanitized title
+        if title:
+            clean_title = sanitize_storage_filename(title)
+            if clean_title and clean_title != "MSK_Video":
+                clean_low = clean_title.lower()
+                for f in target_dir.iterdir():
+                    if f.is_file() and not f.name.endswith(".part") and not f.name.endswith(".ytdl"):
+                        f_stem_low = f.stem.lower()
+                        if clean_low in f_stem_low or f_stem_low in clean_low:
+                            return f
+                        # Prefix match for long titles
+                        pfx = clean_low[:32].strip()
+                        if len(pfx) >= 10 and pfx in f_stem_low:
+                            return f
+    except Exception as e:
+        print(f"[FindMedia] Notice: {e}")
+    return None
 
 
 def open_web_url(target_url: str):
@@ -1126,7 +1164,7 @@ class AndroidNotificationManager:
             NotificationBuilder = autoclass("android.app.Notification$Builder")
             builder = NotificationBuilder(self.context, self.channel_id)
             clean_title = safe_display_text(title)
-            builder.setContentTitle(f"Downloading: {clean_title[:38]}")
+            builder.setContentTitle(f"Downloading: {clean_title}")
             builder.setContentText(f"{percent}%{speed_str}")
             builder.setSmallIcon(self.context.getApplicationInfo().icon)
             builder.setProgress(100, percent, False)
@@ -1142,8 +1180,9 @@ class AndroidNotificationManager:
             from jnius import autoclass
             NotificationBuilder = autoclass("android.app.Notification$Builder")
             builder = NotificationBuilder(self.context, self.channel_id)
+            clean_fname = safe_display_text(filename)
             builder.setContentTitle("Download Complete!")
-            builder.setContentText(f"Saved: {filename[:42]}")
+            builder.setContentText(f"Saved: {clean_fname}")
             builder.setSmallIcon(self.context.getApplicationInfo().icon)
             builder.setProgress(0, 0, False)
             builder.setOngoing(False)
@@ -2223,11 +2262,18 @@ if KIVY_AVAILABLE:
                 font_size="10.5sp",
                 size_hint_y=0.5,
             )
-            prev_play_btn.bind(
-                on_press=lambda ins: self.open_video_player_modal(
-                    self.current_preview_info or {"url": self.url_input.text, "title": self.preview_title.text}
+            def on_home_preview_play(ins):
+                media_info = self.current_preview_info or {"url": self.url_input.text, "title": self.preview_title.text}
+                local_file = find_downloaded_media_file(
+                    title=media_info.get("title"),
+                    item_id=media_info.get("id")
                 )
-            )
+                if local_file and local_file.exists():
+                    open_media_file(local_file)
+                else:
+                    self.open_video_player_modal(media_info)
+
+            prev_play_btn.bind(on_press=on_home_preview_play)
 
             prev_dl_btn = IconActionButton(
                 icon_path="download_arrow.png",
@@ -2487,8 +2533,8 @@ if KIVY_AVAILABLE:
                 return
             self.audio_playlist = audio_files
             self.audio_index = 0
-            self.play_audio_track(self.audio_playlist[0])
-            self.update_status(f"[color=#00E676]Playing playlist:[/color] 1 of {len(audio_files)} tracks", 0)
+            open_media_file(self.audio_playlist[0])
+            self.update_status(f"[color=#00E676]Playing in Device Player:[/color] {safe_display_text(self.audio_playlist[0].stem)}", 0)
 
         def set_downloads_filter(self, filter_type: str):
             self.active_filter = filter_type
@@ -3259,7 +3305,14 @@ if KIVY_AVAILABLE:
                 bg_color=(0.18, 0.24, 0.38, 1.0),
                 text_color=(0.40, 0.85, 1.0, 1.0),
             )
-            play_btn.bind(on_press=lambda ins, it=item: self.open_video_player_modal(it))
+            def on_card_play(ins, it=item):
+                dl_file = find_downloaded_media_file(title=it.get("title"), item_id=it.get("id"))
+                if dl_file and dl_file.exists():
+                    open_media_file(dl_file)
+                else:
+                    self.open_video_player_modal(it)
+
+            play_btn.bind(on_press=on_card_play)
             btn_col.add_widget(play_btn)
 
             dl_btn = IconActionButton(
@@ -3611,7 +3664,13 @@ if KIVY_AVAILABLE:
             raw_title = media_item.get("title") or "YouTube Video"
             clean_title = safe_display_text(raw_title)
 
-            # Thumbnail & Player Display Box (Tap to play directly in-app)
+            # Check if media item has already been downloaded offline
+            downloaded_file = find_downloaded_media_file(
+                title=clean_title,
+                item_id=media_item.get("id")
+            )
+
+            # Thumbnail & Player Display Box (Tap to play directly)
             player_box = BoxLayout(
                 orientation="vertical",
                 size_hint_y=None,
@@ -3633,17 +3692,21 @@ if KIVY_AVAILABLE:
             thumb_img.bind(on_error=on_pthumb_error)
             player_box.add_widget(thumb_img)
 
-            # Tap thumbnail to immediately launch in-app player
+            # Tap thumbnail to play in device player if downloaded, else in-app online
             def on_thumb_click(instance, touch):
                 if instance.collide_point(*touch.pos):
-                    play_online_video(media_item.get("url", ""), title=clean_title)
+                    if downloaded_file and downloaded_file.exists():
+                        modal.dismiss()
+                        open_media_file(downloaded_file)
+                    else:
+                        play_online_video(media_item.get("url", ""), title=clean_title)
                     return True
                 return False
             player_box.bind(on_touch_down=on_thumb_click)
             content.add_widget(player_box)
 
             t_lbl = Label(
-                text=f"[b]{clean_title[:65]}[/b]",
+                text=f"[b]{clean_title}[/b]",
                 markup=True,
                 font_size="12.5sp",
                 color=(1.0, 1.0, 1.0, 1.0),
@@ -3651,6 +3714,8 @@ if KIVY_AVAILABLE:
                 valign="top",
                 size_hint_y=None,
                 height=dp(34),
+                shorten=True,
+                shorten_from="right",
             )
             t_lbl.bind(size=t_lbl.setter("text_size"))
             content.add_widget(t_lbl)
@@ -3669,19 +3734,31 @@ if KIVY_AVAILABLE:
             meta_lbl.bind(size=meta_lbl.setter("text_size"))
             content.add_widget(meta_lbl)
 
-            # Player Action Buttons: [▶ PLAY NOW] + [🎧 PLAY IN BACKGROUND (SCREEN-OFF MODE)] + [⬇ DOWNLOAD / CLOSE]
+            # Player Action Buttons: [▶ PLAY NOW] + [🎧 PLAY IN BACKGROUND] + [⬇ DOWNLOAD / CLOSE]
             btn_col = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None, height=dp(130))
 
-            play_inapp_btn = IconActionButton(
-                icon_path="play.png",
-                text="▶ PLAY NOW (IN-APP PLAYER)",
-                bg_color=(0.12, 0.55, 0.95, 1.0),
-                text_color=(1, 1, 1, 1),
-                font_size="12sp",
-                size_hint_y=None,
-                height=dp(38),
-            )
-            play_inapp_btn.bind(on_press=lambda ins, u=media_item["url"], t=clean_title: play_online_video(u, title=t))
+            if downloaded_file and downloaded_file.exists():
+                play_inapp_btn = IconActionButton(
+                    icon_path="play.png",
+                    text="▶ PLAY IN DEVICE MEDIA PLAYER (OFFLINE)",
+                    bg_color=(0.08, 0.55, 0.25, 1.0),
+                    text_color=(1, 1, 1, 1),
+                    font_size="11.5sp",
+                    size_hint_y=None,
+                    height=dp(38),
+                )
+                play_inapp_btn.bind(on_press=lambda ins, f=downloaded_file: (modal.dismiss(), open_media_file(f)))
+            else:
+                play_inapp_btn = IconActionButton(
+                    icon_path="play.png",
+                    text="▶ PLAY NOW (ONLINE)",
+                    bg_color=(0.12, 0.55, 0.95, 1.0),
+                    text_color=(1, 1, 1, 1),
+                    font_size="12sp",
+                    size_hint_y=None,
+                    height=dp(38),
+                )
+                play_inapp_btn.bind(on_press=lambda ins, u=media_item.get("url", ""), t=clean_title: play_online_video(u, title=t))
             btn_col.add_widget(play_inapp_btn)
 
             bg_audio_btn = IconActionButton(
@@ -4418,7 +4495,7 @@ if KIVY_AVAILABLE:
                     return
 
                 # Render each downloaded item
-                for media_path in media_files[:30]:
+                for media_path in media_files[:100]:
                     size_bytes = media_path.stat().st_size if media_path.exists() else 0
                     size_str = format_bytes(size_bytes)
                     is_audio_file = media_path.suffix.lower() in (".mp3", ".m4a", ".wav", ".ogg", ".opus", ".flac", ".aac")
@@ -4430,27 +4507,33 @@ if KIVY_AVAILABLE:
                         padding=[dp(10), dp(6)],
                         spacing=dp(8),
                         size_hint_y=None,
-                        height=dp(52),
+                        height=dp(58),
                         bg_color=(0.10, 0.12, 0.18, 1.0),
                     )
 
                     clean_name = safe_display_text(media_path.stem)
-                    if len(clean_name) > 28:
-                        clean_name = clean_name[:25] + "..."
 
                     item_lbl = Label(
-                        text=f"[b][color={tag_color}]{tag_str}[/color] {clean_name}[/b]\n[size=10sp][color=#90CAF9]{size_str}[/color] • [color=#78909C]{media_path.suffix.upper()}[/color][/size]",
+                        text=f"[b][color={tag_color}]{tag_str}[/color] {clean_name}[/b]\n[size=10sp][color=#90CAF9]{size_str}[/color] • [color=#78909C]{media_path.suffix.upper()}[/color] • [color=#81D4FA]Device Player[/color][/size]",
                         markup=True,
                         font_size="11.5sp",
                         color=(0.92, 0.94, 0.98, 1.0),
                         size_hint_x=1.0,
                         halign="left",
                         valign="middle",
+                        shorten=True,
+                        shorten_from="right",
                     )
                     item_lbl.bind(size=item_lbl.setter("text_size"))
+                    def on_item_click(instance, touch, p=media_path):
+                        if instance.collide_point(*touch.pos):
+                            open_media_file(p)
+                            return True
+                        return False
+                    item_lbl.bind(on_touch_down=on_item_click)
                     row.add_widget(item_lbl)
 
-                    # PLAY BUTTON with icon
+                    # PLAY BUTTON with icon - Always plays in device media player
                     play_btn = IconActionButton(
                         icon_path="play.png",
                         text="PLAY",
@@ -4460,10 +4543,7 @@ if KIVY_AVAILABLE:
                         bg_color=(0.08, 0.50, 0.24, 1.0),
                         text_color=(1, 1, 1, 1),
                     )
-                    if is_audio_file:
-                        play_btn.bind(on_press=lambda ins, p=media_path: self.play_audio_track(p))
-                    else:
-                        play_btn.bind(on_press=lambda ins, p=media_path: open_media_file(p))
+                    play_btn.bind(on_press=lambda ins, p=media_path: open_media_file(p))
                     row.add_widget(play_btn)
 
                     # DELETE BUTTON with icon
@@ -4493,13 +4573,14 @@ if KIVY_AVAILABLE:
             def async_delete():
                 success = delete_media_file(file_path)
                 Clock.schedule_once(lambda dt: self.refresh_library(), 0.15)
+                clean_deleted_name = safe_display_text(file_path.name)
                 if success:
                     Clock.schedule_once(
-                        lambda dt: self.update_status(f"[color=#00E676]Deleted:[/color] {file_path.name[:25]}", 0)
+                        lambda dt, n=clean_deleted_name: self.update_status(f"[color=#00E676]Deleted:[/color] {n}", 0)
                     )
                 else:
                     Clock.schedule_once(
-                        lambda dt: self.update_status(f"[color=#FFB300]Removed from list:[/color] {file_path.name[:25]}", 0)
+                        lambda dt, n=clean_deleted_name: self.update_status(f"[color=#FFB300]Removed from list:[/color] {n}", 0)
                     )
 
             threading.Thread(target=async_delete, daemon=True).start()
@@ -5144,7 +5225,7 @@ if KIVY_AVAILABLE:
 
                                 if tot > 1:
                                     overall_pct = int(((cur_i - 1) / tot) * 100) + int(pct / tot)
-                                    status_msg = f"[{cur_i}/{tot}] {overall_pct}% ({pct}%) • {cur_t[:18]}...{speed_str}"
+                                    status_msg = f"[{cur_i}/{tot}] {overall_pct}% ({pct}%) • {safe_display_text(cur_t)}{speed_str}"
                                     notif_pct = overall_pct
                                 else:
                                     overall_pct = pct
@@ -5158,7 +5239,7 @@ if KIVY_AVAILABLE:
                                 now = time.time()
                                 if (now - self.last_notif_time) > 1.2 or pct >= 99:
                                     self.last_notif_time = now
-                                    notif_title = f"[{cur_i}/{tot}] {cur_t[:30]}" if tot > 1 else f"Downloading: {cur_t[:30]}"
+                                    notif_title = f"[{cur_i}/{tot}] {cur_t}" if tot > 1 else f"Downloading: {cur_t}"
                                     self.notification_manager.show_progress(notif_title, notif_pct, speed_str)
 
                         elif d.get("status") == "finished":
@@ -5171,7 +5252,7 @@ if KIVY_AVAILABLE:
 
                     base_ydl_opts = {
                         "windowsfilenames": True,
-                        "trim_file_name": 140,
+                        "trim_file_name": 215,
                         "paths": {"home": str(target_dir), "temp": str(target_dir)},
                         "progress_hooks": [progress_hook],
                         "logger": safe_logger,
@@ -5291,7 +5372,7 @@ if KIVY_AVAILABLE:
                             overall_start_pct = int(((idx - 1) / total_count) * 100)
                             Clock.schedule_once(
                                 lambda dt, i=idx, tot=total_count, t=raw_item_title, p=overall_start_pct: self.update_status(
-                                    f"Starting [{i}/{tot}]: {safe_display_text(t)[:28]}...", p
+                                    f"Starting [{i}/{tot}]: {safe_display_text(t)}...", p
                                 )
                             )
                             self.notification_manager.show_progress(f"[{idx}/{total_count}] {raw_item_title}", overall_start_pct)
@@ -5312,7 +5393,7 @@ if KIVY_AVAILABLE:
                             if "File name too long" in err_str or "Errno 36" in err_str:
                                 print(f"[Download] Retrying with clean short filename due to: {err_str}")
                                 fallback_opts = dict(item_opts)
-                                fallback_opts["outtmpl"] = str(target_dir / "%(title).60s.%(ext)s")
+                                fallback_opts["outtmpl"] = str(target_dir / "%(title).180s.%(ext)s")
                                 with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
                                     info = ydl_fb.extract_info(item_url, download=True)
                             elif total_count > 1:
@@ -5378,8 +5459,9 @@ if KIVY_AVAILABLE:
                             msg = f"[color=#00E676]Download Complete![/color] {len(saved_files)} of {total_count} saved."
                             self.notification_manager.show_finished(f"MSK YTDL {plat}", f"{len(saved_files)} items saved")
                         else:
-                            msg = f"[color=#00E676]Done![/color] Saved: {last_file.name[:32]}"
-                            self.notification_manager.show_finished(f"MSK YTDL {plat}", last_file.name[:32])
+                            clean_fname = safe_display_text(last_file.name)
+                            msg = f"[color=#00E676]Done![/color] Saved: {clean_fname}"
+                            self.notification_manager.show_finished(f"MSK YTDL {plat}", clean_fname)
 
                         Clock.schedule_once(lambda dt, m=msg: self.update_status(m, 100))
                     else:

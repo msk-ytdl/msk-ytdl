@@ -142,5 +142,40 @@ def test_play_online_video_with_instagram_reel():
         assert mock_popen.called
 
 
+def test_sanitize_storage_filename_preserves_full_name():
+    from mobile_app import sanitize_storage_filename
+    long_title = "A" * 200 + " - Official 4K Ultra HD Music Video"
+    sanitized = sanitize_storage_filename(long_title)
+    # Must preserve up to 215 characters without being cut off to 140 or 25
+    assert len(sanitized) > 180
+    assert sanitized.startswith("A" * 50)
+
+
+def test_find_downloaded_media_file_by_id_and_title(tmp_path):
+    from mobile_app import find_downloaded_media_file
+    with patch("mobile_app.get_android_download_dir", return_value=tmp_path):
+        # Create a test video and test audio in temp downloads dir
+        test_video = tmp_path / "Awesome Music Video [dQw4w9WgXcQ].mp4"
+        test_video.write_text("dummy")
+
+        test_audio = tmp_path / "Complete Long Audio Song Name By Artist.mp3"
+        test_audio.write_text("dummy")
+
+        # 1. Match by item_id
+        found_by_id = find_downloaded_media_file(item_id="dQw4w9WgXcQ")
+        assert found_by_id is not None
+        assert found_by_id.name == test_video.name
+
+        # 2. Match by title
+        found_by_title = find_downloaded_media_file(title="Complete Long Audio Song Name By Artist")
+        assert found_by_title is not None
+        assert found_by_title.name == test_audio.name
+
+        # 3. Non-existent returns None
+        not_found = find_downloaded_media_file(title="Non Existent Track", item_id="xxxxxx")
+        assert not_found is None
+
+
+
 
 
