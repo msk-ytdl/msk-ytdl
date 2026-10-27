@@ -525,8 +525,92 @@ def scan_media_file(filepath: Path):
         print(f"[Android] MediaScanner notice: {e}")
 
 
+class AndroidNativeAudioPlayer:
+    """Wrapper around android.media.MediaPlayer for Android with background & screen-off playback support."""
+    def __init__(self, source_path_or_url: str):
+        self.state = "stop"
+        self._mp = None
+        self._source = source_path_or_url
+        self._duration = 0.0
+        try:
+            from jnius import autoclass
+            MediaPlayer = autoclass("android.media.MediaPlayer")
+            AudioAttributes = autoclass("android.media.AudioAttributes")
+            AudioAttributesBuilder = autoclass("android.media.AudioAttributes$Builder")
+
+            self._mp = MediaPlayer()
+            attrs = AudioAttributesBuilder() \
+                .setUsage(AudioAttributes.USAGE_MEDIA) \
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC) \
+                .build()
+            self._mp.setAudioAttributes(attrs)
+            self._mp.setDataSource(str(source_path_or_url))
+            self._mp.prepare()
+            dur = self._mp.getDuration()
+            if dur and dur > 0:
+                self._duration = dur / 1000.0
+        except Exception as e:
+            print(f"[AndroidNativeAudioPlayer] Init notice: {e}")
+            if self._mp:
+                try:
+                    self._mp.release()
+                except Exception:
+                    pass
+                self._mp = None
+
+    def play(self):
+        if self._mp:
+            try:
+                self._mp.start()
+                self.state = "play"
+                return True
+            except Exception as e:
+                print(f"[AndroidNativeAudioPlayer] Play notice: {e}")
+        return False
+
+    def stop(self):
+        if self._mp:
+            try:
+                if self._mp.isPlaying():
+                    self._mp.pause()
+                self.state = "stop"
+            except Exception as e:
+                print(f"[AndroidNativeAudioPlayer] Stop notice: {e}")
+
+    def unload(self):
+        if self._mp:
+            try:
+                self._mp.stop()
+                self._mp.release()
+            except Exception:
+                pass
+            self._mp = None
+            self.state = "stop"
+
+    def get_pos(self):
+        if self._mp:
+            try:
+                return (self._mp.getCurrentPosition() or 0) / 1000.0
+            except Exception:
+                return 0.0
+        return 0.0
+
+    @property
+    def length(self):
+        if self._mp:
+            try:
+                dur = self._mp.getDuration()
+                if dur and dur > 0:
+                    self._duration = dur / 1000.0
+            except Exception:
+                pass
+        return self._duration
+
+
 def open_media_file(filepath: Path):
     """Launch the downloaded video or song in the default Android or desktop player."""
+    if not filepath:
+        return
     try:
         if is_running_on_android():
             from jnius import autoclass
@@ -534,40 +618,74 @@ def open_media_file(filepath: Path):
             Intent = autoclass("android.content.Intent")
             Uri = autoclass("android.net.Uri")
             File = autoclass("java.io.File")
+            Build = autoclass("android.os.Build")
             activity = PythonActivity.mActivity
 
-            # Disable strict mode URI exposed checks on modern Android
-            try:
-                StrictMode = autoclass("android.os.StrictMode")
-                builder = autoclass("android.os.StrictMode$VmPolicy$Builder")()
-                StrictMode.setVmPolicy(builder.build())
-            except Exception:
-                pass
-
             file_obj = File(str(filepath.resolve()))
-            file_uri = Uri.fromFile(file_obj)
             intent = Intent(Intent.ACTION_VIEW)
 
             ext = filepath.suffix.lower()
-            if ext in (".mp3", ".m4a", ".aac", ".ogg", ".opus"):
+            if ext in (".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac"):
                 mime_type = "audio/*"
-            else:
+            elif ext in (".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".3gp"):
                 mime_type = "video/*"
+            elif ext == ".apk":
+                mime_type = "application/vnd.android.package-archive"
+            else:
+                mime_type = "*/*"
+
+            file_uri = None
+            if Build.VERSION.SDK_INT >= 24:
+                try:
+                    FileProvider = autoclass("androidx.core.content.FileProvider")
+                    pkg = activity.getPackageName()
+                    file_uri = FileProvider.getUriForFile(activity, f"{pkg}.fileprovider", file_obj)
+                except Exception as fe:
+                    print(f"[OpenMedia] FileProvider notice: {fe}")
+
+            if file_uri is None:
+                try:
+                    StrictMode = autoclass("android.os.StrictMode")
+                    builder = autoclass("android.os.StrictMode$VmPolicy$Builder")()
+                    StrictMode.setVmPolicy(builder.build())
+                except Exception:
+                    pass
+                file_uri = Uri.fromFile(file_obj)
 
             intent.setDataAndType(file_uri, mime_type)
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            activity.startActivity(intent)
+            intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+
+            # Explicitly grant URI permission to resolving activities
+            try:
+                pm = activity.getPackageManager()
+                matches = pm.queryIntentActivities(intent, 65536)  # MATCH_DEFAULT_ONLY
+                if matches:
+                    for i in range(matches.size()):
+                        target_pkg = matches.get(i).activityInfo.packageName
+                        activity.grantUriPermission(target_pkg, file_uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            except Exception as ge:
+                print(f"[OpenMedia] Grant permission notice: {ge}")
+
+            chooser = Intent.createChooser(intent, "Play media with...")
+            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            activity.startActivity(chooser)
         else:
             # Desktop fallback (Windows / macOS / Linux)
+            path_str = str(filepath.resolve())
             if sys.platform == "win32":
-                os.startfile(str(filepath.resolve()))
+                try:
+                    os.startfile(path_str)
+                except Exception:
+                    import subprocess
+                    subprocess.Popen(["explorer", path_str])
             elif sys.platform == "darwin":
                 import subprocess
-                subprocess.Popen(["open", str(filepath.resolve())])
+                subprocess.Popen(["open", path_str])
             else:
                 import subprocess
-                subprocess.Popen(["xdg-open", str(filepath.resolve())])
+                subprocess.Popen(["xdg-open", path_str])
     except Exception as e:
         print(f"[OpenMedia] Error opening file {filepath.name}: {e}")
 
@@ -599,10 +717,10 @@ def play_online_video(video_url: str, title: str = "Video Player"):
     Play online video stream inside the app without redirecting to external YouTube app.
     On Android:
       Opens a high-performance in-app Dialog with hardware-accelerated WebView rendering
-      the responsive YouTube embedded player with full touch controls, pause, play, seek,
-      and an in-app Close button (keeps user 100% inside MSK YTDL).
+      the responsive YouTube / social media player with touch controls, pause, play, seek,
+      direct in-app external app launcher button, and an in-app Close button.
     On Desktop:
-      Launches a dedicated in-app companion player window via pywebview (or direct embed).
+      Launches a dedicated in-app companion player window via pywebview (with fallback to browser).
     """
     if not video_url:
         return
@@ -612,11 +730,13 @@ def play_online_video(video_url: str, title: str = "Video Player"):
     if m:
         vid_id = m.group(1)
 
-    embed_url = (
-        f"https://www.youtube-nocookie.com/embed/{vid_id}?autoplay=1&playsinline=1&rel=0&modestbranding=1"
-        if vid_id
-        else clean_url
-    )
+    clean_title = safe_display_text(title or "MSK Video Player")
+    if vid_id:
+        embed_url = f"https://www.youtube.com/embed/{vid_id}?autoplay=1&playsinline=1&enablejsapi=1&origin=https://www.youtube.com"
+        watch_url = f"https://www.youtube.com/watch?v={vid_id}"
+    else:
+        embed_url = clean_url
+        watch_url = clean_url
 
     if is_running_on_android():
         try:
@@ -640,38 +760,55 @@ def play_online_video(video_url: str, title: str = "Video Player"):
                     LayoutParams = autoclass("android.widget.LinearLayout$LayoutParams")
                     Window = autoclass("android.view.Window")
                     WindowManagerLayoutParams = autoclass("android.view.WindowManager$LayoutParams")
+                    View = autoclass("android.view.View")
+                    Intent = autoclass("android.content.Intent")
+                    Uri = autoclass("android.net.Uri")
 
                     dialog = Dialog(activity)
-                    dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+                    try:
+                        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+                    except Exception:
+                        pass
 
                     root = LinearLayout(activity)
                     root.setOrientation(LinearLayout.VERTICAL)
                     root.setBackgroundColor(Color.parseColor("#0F141C"))
 
-                    # Top header bar: Title + Close Button
+                    # Top header bar: Title + Open External Button + Close Button
                     header = LinearLayout(activity)
                     header.setOrientation(LinearLayout.HORIZONTAL)
                     header.setBackgroundColor(Color.parseColor("#171D27"))
                     header.setGravity(Gravity.CENTER_VERTICAL)
                     h_params = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
                     header.setLayoutParams(h_params)
-                    header.setPadding(28, 18, 28, 18)
+                    header.setPadding(24, 14, 24, 14)
 
                     tv = TextView(activity)
-                    disp_title = (title[:36] + "...") if len(title) > 38 else title
+                    disp_title = (clean_title[:32] + "...") if len(clean_title) > 34 else clean_title
                     tv.setText(f"▶ {disp_title}")
                     tv.setTextColor(Color.parseColor("#FFD54F"))
-                    tv.setTextSize(15)
+                    tv.setTextSize(14)
                     tv_params = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1.0)
                     tv.setLayoutParams(tv_params)
                     header.addView(tv)
 
+                    # External app button [🌐 OPEN]
+                    open_app_btn = Button(activity)
+                    open_app_btn.setText("🌐 OPEN")
+                    open_app_btn.setTextColor(Color.WHITE)
+                    open_app_btn.setTextSize(12)
+                    open_app_btn.setBackgroundColor(Color.parseColor("#1976D2"))
+                    open_app_btn.setPadding(16, 6, 16, 6)
+                    open_params = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT)
+                    open_params.setMargins(0, 0, 12, 0)
+                    open_app_btn.setLayoutParams(open_params)
+
                     close_btn = Button(activity)
                     close_btn.setText("✕ CLOSE")
                     close_btn.setTextColor(Color.WHITE)
-                    close_btn.setTextSize(13)
+                    close_btn.setTextSize(12)
                     close_btn.setBackgroundColor(Color.parseColor("#E53935"))
-                    close_btn.setPadding(20, 8, 20, 8)
+                    close_btn.setPadding(16, 6, 16, 6)
                     btn_params = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT)
                     close_btn.setLayoutParams(btn_params)
 
@@ -679,32 +816,60 @@ def play_online_video(video_url: str, title: str = "Video Player"):
                     settings = webview.getSettings()
                     settings.setJavaScriptEnabled(True)
                     settings.setDomStorageEnabled(True)
+                    settings.setDatabaseEnabled(True)
                     settings.setMediaPlaybackRequiresUserGesture(False)
                     settings.setSupportZoom(True)
                     settings.setBuiltInZoomControls(False)
+                    settings.setAllowFileAccess(True)
+                    settings.setAllowContentAccess(True)
+                    # Use standard mobile Chrome User-Agent so YouTube never blocks embedded playback with wv token
+                    settings.setUserAgentString("Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36")
+
+                    try:
+                        webview.setLayerType(View.LAYER_TYPE_HARDWARE, None)
+                    except Exception:
+                        pass
+
                     webview.setWebChromeClient(WebChromeClient())
                     webview.setWebViewClient(WebViewClient())
                     webview.setBackgroundColor(Color.BLACK)
 
                     from jnius import PythonJavaClass, java_method
 
-                    class _CloseListener(PythonJavaClass):
+                    class _PlayerButtonListener(PythonJavaClass):
                         __javainterfaces__ = ["android/view/View$OnClickListener"]
 
-                        def __init__(self, d, wv):
+                        def __init__(self, action_type, d, wv, target_u):
                             super().__init__()
+                            self.action_type = action_type
                             self.d = d
                             self.wv = wv
+                            self.target_u = target_u
 
                         @java_method("(Landroid/view/View;)V")
                         def onClick(self, v):
-                            try:
-                                self.wv.loadUrl("about:blank")
-                            except Exception:
-                                pass
-                            self.d.dismiss()
+                            if self.action_type == "close":
+                                try:
+                                    self.wv.loadUrl("about:blank")
+                                except Exception:
+                                    pass
+                                self.d.dismiss()
+                            elif self.action_type == "open":
+                                try:
+                                    open_intent = Intent(Intent.ACTION_VIEW, Uri.parse(self.target_u))
+                                    open_intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    activity.startActivity(open_intent)
+                                except Exception as err:
+                                    print(f"[Player] Open external error: {err}")
 
-                    close_btn.setOnClickListener(_CloseListener(dialog, webview))
+                    # Retain strong references on the dialog object to prevent GC crashes
+                    dialog._close_listener = _PlayerButtonListener("close", dialog, webview, watch_url)
+                    close_btn.setOnClickListener(dialog._close_listener)
+
+                    dialog._open_listener = _PlayerButtonListener("open", dialog, webview, watch_url)
+                    open_app_btn.setOnClickListener(dialog._open_listener)
+
+                    header.addView(open_app_btn)
                     header.addView(close_btn)
                     root.addView(header)
 
@@ -712,25 +877,26 @@ def play_online_video(video_url: str, title: str = "Video Player"):
                     webview.setLayoutParams(wv_params)
                     root.addView(webview)
 
-                    html_content = f"""
-                    <!DOCTYPE html>
-                    <html>
-                    <head>
-                        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-                        <style>
-                            body, html {{ margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }}
-                            .video-container {{ position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }}
-                            iframe {{ width: 100%; height: 100%; border: none; }}
-                        </style>
-                    </head>
-                    <body>
-                        <div class="video-container">
-                            <iframe src="{embed_url}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
-                        </div>
-                    </body>
-                    </html>
-                    """
-                    webview.loadDataWithBaseURL("https://www.youtube-nocookie.com", html_content, "text/html", "UTF-8", None)
+                    if vid_id:
+                        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <style>
+        body, html {{ margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }}
+        .video-container {{ position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }}
+        iframe {{ width: 100%; height: 100%; border: none; }}
+    </style>
+</head>
+<body>
+    <div class="video-container">
+        <iframe src="{embed_url}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
+    </div>
+</body>
+</html>"""
+                        webview.loadDataWithBaseURL("https://www.youtube.com", html_content, "text/html", "UTF-8", None)
+                    else:
+                        webview.loadUrl(embed_url)
 
                     dialog.setContentView(root)
                     w = dialog.getWindow()
@@ -740,13 +906,7 @@ def play_online_video(video_url: str, title: str = "Video Player"):
                 except Exception as inner_e:
                     print(f"[Player] Android native dialog error: {inner_e}")
                     try:
-                        Intent = autoclass("android.content.Intent")
-                        Uri = autoclass("android.net.Uri")
-                        PythonActivity = autoclass("org.kivy.android.PythonActivity")
-                        act = PythonActivity.mActivity
-                        in_app_intent = Intent(Intent.ACTION_VIEW, Uri.parse(embed_url))
-                        in_app_intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        act.startActivity(in_app_intent)
+                        open_web_url(watch_url)
                     except Exception as fb_err:
                         print(f"[Player] Android fallback error: {fb_err}")
 
@@ -758,8 +918,9 @@ def play_online_video(video_url: str, title: str = "Video Player"):
     # Desktop In-App Player (Windows / macOS / Linux)
     try:
         import subprocess
-        clean_title = safe_display_text(title or "MSK Video Player")
-        safe_t = re.sub(r'["\']', '', clean_title)[:55]
+        safe_t = re.sub(r'["\'\\]', '', clean_title)[:55]
+        target_play_url = embed_url if vid_id else clean_url
+        fallback_url = watch_url
         runner_code = f"""
 import sys
 try:
@@ -775,20 +936,20 @@ iframe {{ width: 100%; height: 100%; border: none; }}
 </style>
 </head>
 <body>
-<iframe src="{embed_url}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+<iframe src="{target_play_url}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
 </body>
 </html>'''
     win = webview.create_window('{safe_t} - MSK Player', html=html_page, width=880, height=530, background_color='#0b0e14')
     webview.start()
 except Exception:
     import webbrowser
-    webbrowser.open('{embed_url}')
+    webbrowser.open('{fallback_url}')
 """
         subprocess.Popen([sys.executable, "-c", runner_code])
     except Exception as d_err:
         print(f"[Player] Desktop player launch notice: {d_err}")
         import webbrowser
-        webbrowser.open(embed_url)
+        webbrowser.open(watch_url)
 
 
 def delete_media_file(filepath: Path) -> bool:
@@ -2318,7 +2479,7 @@ if KIVY_AVAILABLE:
             """Start continuous offline playback of all downloaded audio tracks."""
             target_dir = get_android_download_dir()
             audio_files = []
-            for ext in ("*.mp3", "*.m4a", "*.wav", "*.ogg"):
+            for ext in ("*.mp3", "*.m4a", "*.wav", "*.ogg", "*.opus", "*.flac", "*.aac"):
                 audio_files.extend(target_dir.glob(ext))
             audio_files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
             if not audio_files:
@@ -2734,12 +2895,21 @@ if KIVY_AVAILABLE:
             thumb_box.add_widget(thumb_img)
 
             clean_title = safe_display_text(reel_item.get("title", "Viral Reel"))
-            def on_thumb_tap(instance, touch):
+            def on_thumb_touch_down(instance, touch):
                 if instance.collide_point(*touch.pos):
-                    play_online_video(reel_item.get("url", ""), title=clean_title)
-                    return True
+                    touch.ud[f"reel_thumb_{id(instance)}"] = (touch.x, touch.y)
                 return False
-            thumb_box.bind(on_touch_down=on_thumb_tap)
+
+            def on_thumb_touch_up(instance, touch):
+                k = f"reel_thumb_{id(instance)}"
+                if k in touch.ud and instance.collide_point(*touch.pos):
+                    sx, sy = touch.ud[k]
+                    if abs(touch.x - sx) < dp(14) and abs(touch.y - sy) < dp(14):
+                        play_online_video(reel_item.get("url", ""), title=clean_title)
+                        return True
+                return False
+
+            thumb_box.bind(on_touch_down=on_thumb_touch_down, on_touch_up=on_thumb_touch_up)
             card.add_widget(thumb_box)
 
             # 3. Reel Title & Hashtags
@@ -2840,11 +3010,20 @@ if KIVY_AVAILABLE:
                                     pass
                                 self.current_sound = None
 
-                            try:
-                                self.current_sound = SoundLoader.load(stream_url)
-                            except Exception as le:
-                                print(f"[SoundLoader] Stream notice: {le}")
-                                self.current_sound = None
+                            if is_running_on_android():
+                                try:
+                                    native_p = AndroidNativeAudioPlayer(stream_url)
+                                    if native_p._mp:
+                                        self.current_sound = native_p
+                                except Exception as ne:
+                                    print(f"[BackgroundAudio] Android native stream notice: {ne}")
+
+                            if not self.current_sound:
+                                try:
+                                    self.current_sound = SoundLoader.load(stream_url)
+                                except Exception as le:
+                                    print(f"[SoundLoader] Stream notice: {le}")
+                                    self.current_sound = None
 
                             if self.current_sound:
                                 self.is_audio_playing = True
@@ -4198,7 +4377,7 @@ if KIVY_AVAILABLE:
 
                 # Scan media files
                 all_files: List[Path] = []
-                for ext in ("*.mp4", "*.m4a", "*.mp3", "*.mkv", "*.webm"):
+                for ext in ("*.mp4", "*.m4a", "*.mp3", "*.mkv", "*.webm", "*.wav", "*.ogg", "*.opus", "*.flac", "*.avi", "*.mov"):
                     all_files.extend(target_dir.glob(ext))
 
                 # Sort newest first
@@ -4209,9 +4388,9 @@ if KIVY_AVAILABLE:
 
                 # Apply active filter
                 if self.active_filter == "videos":
-                    media_files = [p for p in all_files if p.suffix.lower() in (".mp4", ".mkv", ".webm")]
+                    media_files = [p for p in all_files if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".3gp")]
                 elif self.active_filter == "audio":
-                    media_files = [p for p in all_files if p.suffix.lower() in (".mp3", ".m4a")]
+                    media_files = [p for p in all_files if p.suffix.lower() in (".mp3", ".m4a", ".wav", ".ogg", ".opus", ".flac", ".aac")]
                 else:
                     media_files = all_files
 
@@ -4242,7 +4421,7 @@ if KIVY_AVAILABLE:
                 for media_path in media_files[:30]:
                     size_bytes = media_path.stat().st_size if media_path.exists() else 0
                     size_str = format_bytes(size_bytes)
-                    is_audio_file = media_path.suffix.lower() in (".mp3", ".m4a")
+                    is_audio_file = media_path.suffix.lower() in (".mp3", ".m4a", ".wav", ".ogg", ".opus", ".flac", ".aac")
                     tag_str = "[AUDIO]" if is_audio_file else "[VIDEO]"
                     tag_color = "#FFA000" if is_audio_file else "#00E676"
 
@@ -4483,7 +4662,7 @@ if KIVY_AVAILABLE:
             # Refresh local audio playlist
             target_dir = get_android_download_dir()
             audio_files = []
-            for ext in ("*.mp3", "*.m4a", "*.wav", "*.ogg"):
+            for ext in ("*.mp3", "*.m4a", "*.wav", "*.ogg", "*.opus", "*.flac", "*.aac"):
                 audio_files.extend(target_dir.glob(ext))
             audio_files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
             self.audio_playlist = audio_files
@@ -4498,11 +4677,24 @@ if KIVY_AVAILABLE:
                     pass
                 self.current_sound = None
 
-            try:
-                self.current_sound = SoundLoader.load(str(file_path.resolve()))
-            except Exception as e:
-                print(f"[SoundLoader] Error loading {file_path.name}: {e}")
-                self.current_sound = None
+            resolved_path = str(file_path.resolve())
+
+            # 1. On Android, try native MediaPlayer first for guaranteed format & scoped storage support
+            if is_running_on_android():
+                try:
+                    native_p = AndroidNativeAudioPlayer(resolved_path)
+                    if native_p._mp:
+                        self.current_sound = native_p
+                except Exception as ne:
+                    print(f"[AudioPlayer] Android native notice: {ne}")
+
+            # 2. Try Kivy SoundLoader
+            if not self.current_sound:
+                try:
+                    self.current_sound = SoundLoader.load(resolved_path)
+                except Exception as e:
+                    print(f"[SoundLoader] Error loading {file_path.name}: {e}")
+                    self.current_sound = None
 
             if not self.current_sound:
                 open_media_file(file_path)

@@ -114,4 +114,33 @@ def test_install_apk_file_safety():
     assert install_apk_file("") is False
 
 
+def test_open_media_file_safety():
+    from mobile_app import open_media_file
+    from pathlib import Path
+    # Empty or None should not throw
+    open_media_file(None)
+
+    with patch("os.startfile", create=True) as mock_start:
+        open_media_file(Path("my_test_video.mp4"))
+        assert mock_start.called
+
+
+def test_android_native_audio_player_safe():
+    from mobile_app import AndroidNativeAudioPlayer
+    player = AndroidNativeAudioPlayer("dummy_stream_or_path.mp3")
+    assert player.state == "stop"
+    assert player.get_pos() == 0.0
+    assert player.length == 0.0
+    assert player.play() is False
+    player.stop()
+    player.unload()
+
+
+def test_play_online_video_with_instagram_reel():
+    with patch("subprocess.Popen") as mock_popen:
+        play_online_video("https://www.instagram.com/reel/C7XYZ123/", title="Instagram Reel")
+        assert mock_popen.called
+
+
+
 
