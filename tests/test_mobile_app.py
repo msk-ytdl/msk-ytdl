@@ -231,6 +231,81 @@ def test_sync_and_migrate_legacy_downloads_safety():
     sync_and_migrate_legacy_downloads()
 
 
+def test_get_ydl_format_selector_audio_never_falls_back_to_video():
+    from mobile_app import get_ydl_format_selector
+
+    # M4A AAC audio option
+    sel_m4a = get_ydl_format_selector("Audio Only (M4A AAC Fast)", has_ffmpeg=False)
+    assert "140" in sel_m4a
+    assert "bestaudio" in sel_m4a
+    # Critical: must NOT fall back to video /best or contain best without audio
+    assert not sel_m4a.endswith("/best")
+    assert "/best/" not in sel_m4a
+
+    # MP3 without ffmpeg (Android)
+    sel_mp3_no_ff = get_ydl_format_selector("Audio Only (HQ MP3 Music + Album Art)", has_ffmpeg=False)
+    assert "140" in sel_mp3_no_ff
+    assert not sel_mp3_no_ff.endswith("/best")
+
+    # MP3 with ffmpeg
+    sel_mp3_ff = get_ydl_format_selector("Audio Only (HQ MP3 Music + Album Art)", has_ffmpeg=True)
+    assert "bestaudio" in sel_mp3_ff
+    assert not sel_mp3_ff.endswith("/best")
+
+
+def test_get_ydl_format_selector_video_qualities():
+    from mobile_app import get_ydl_format_selector
+
+    # 1080p Max Quality
+    sel_1080 = get_ydl_format_selector("Video (Max Quality - 1080p / 720p HD)", has_ffmpeg=False)
+    assert "1080" in sel_1080
+    assert "avc1" in sel_1080
+    assert "ext=mp4" in sel_1080
+    assert "bestaudio[ext=m4a]" in sel_1080
+
+    # 720p HD
+    sel_720 = get_ydl_format_selector("Video (720p HD MP4)", has_ffmpeg=False)
+    assert "720" in sel_720
+    assert "avc1" in sel_720
+    assert "bestaudio[ext=m4a]" in sel_720
+
+    # 360p Fast
+    sel_360 = get_ydl_format_selector("Video (360p Fast MP4)", has_ffmpeg=False)
+    assert "360" in sel_360
+    assert "18" in sel_360
+
+
+def test_mux_video_audio_android_safety(tmp_path):
+    from mobile_app import mux_video_audio_android
+    # Missing files safely returns False
+    res = mux_video_audio_android(tmp_path / "v_missing.mp4", tmp_path / "a_missing.m4a", tmp_path / "out.mp4")
+    assert res is False
+
+
+def test_start_download_chosen_format_options():
+    from mobile_app import get_ydl_format_selector
+
+    # Test all 5 options available in the Download Options Modal:
+    options = {
+        "Video (Max Quality - 1080p / 720p HD)": ("1080", False),
+        "Video (720p HD MP4)": ("720", False),
+        "Video (360p Fast MP4)": ("360", False),
+        "Audio Only (HQ MP3 Music + Album Art)": ("140", True),
+        "Audio Only (M4A AAC Fast)": ("140", True),
+    }
+
+    for opt_name, (expected_token, is_aud) in options.items():
+        sel = get_ydl_format_selector(opt_name, has_ffmpeg=False)
+        assert expected_token in sel, f"Expected {expected_token} in selector for {opt_name}, got: {sel}"
+        if is_aud:
+            assert not sel.endswith("/best"), f"Audio selector must not end with /best: {sel}"
+            assert "bestvideo" not in sel, f"Audio selector must not include bestvideo: {sel}"
+        else:
+            assert "bestvideo" in sel or "18" in sel
+
+
+
+
 
 
 

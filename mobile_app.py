@@ -625,6 +625,167 @@ def scan_media_file(filepath: Path):
         print(f"[Android] MediaScanner notice: {e}")
 
 
+def mux_video_audio_android(video_path: Path, audio_path: Path, output_path: Path) -> bool:
+    """
+    Natively merge separate video (H.264/MP4) and audio (AAC/M4A) streams into a single MP4
+    container using Android's native android.media.MediaMuxer & MediaExtractor APIs via PyJnius.
+    Falls back to system FFmpeg if available on non-Android platforms.
+    """
+    if not video_path.exists() or not audio_path.exists():
+        print(f"[MediaMuxer] Input file missing: v={video_path.exists()}, a={audio_path.exists()}")
+        return False
+
+    # Attempt native Android MediaMuxer via PyJnius
+    if is_running_on_android():
+        try:
+            from jnius import autoclass
+            MediaExtractor = autoclass("android.media.MediaExtractor")
+            MediaMuxer = autoclass("android.media.MediaMuxer")
+            MediaCodec_BufferInfo = autoclass("android.media.MediaCodec$BufferInfo")
+            ByteBuffer = autoclass("java.nio.ByteBuffer")
+
+            v_extractor = MediaExtractor()
+            v_extractor.setDataSource(str(video_path.resolve()))
+
+            a_extractor = MediaExtractor()
+            a_extractor.setDataSource(str(audio_path.resolve()))
+
+            tmp_output = output_path
+            if tmp_output.resolve() in (video_path.resolve(), audio_path.resolve()):
+                tmp_output = output_path.with_name(f"merged_{output_path.name}")
+
+            muxer = MediaMuxer(str(tmp_output.resolve()), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+
+            # 1. Select Video Track
+            video_track_idx = -1
+            for i in range(v_extractor.getTrackCount()):
+                format_obj = v_extractor.getTrackFormat(i)
+                mime = format_obj.getString("mime")
+                if mime and mime.startswith("video/"):
+                    v_extractor.selectTrack(i)
+                    video_track_idx = muxer.addTrack(format_obj)
+                    break
+
+            # 2. Select Audio Track
+            audio_track_idx = -1
+            for i in range(a_extractor.getTrackCount()):
+                format_obj = a_extractor.getTrackFormat(i)
+                mime = format_obj.getString("mime")
+                if mime and mime.startswith("audio/"):
+                    a_extractor.selectTrack(i)
+                    audio_track_idx = muxer.addTrack(format_obj)
+                    break
+
+            if video_track_idx < 0 or audio_track_idx < 0:
+                print(f"[MediaMuxer] Track error: video={video_track_idx}, audio={audio_track_idx}")
+                try:
+                    muxer.release()
+                except Exception:
+                    pass
+                v_extractor.release()
+                a_extractor.release()
+                return False
+
+            muxer.start()
+
+            buf_size = 1024 * 1024  # 1MB buffer
+            buf = ByteBuffer.allocate(buf_size)
+            buffer_info = MediaCodec_BufferInfo()
+
+            # Copy video track samples
+            while True:
+                sample_size = v_extractor.readSampleData(buf, 0)
+                if sample_size < 0:
+                    break
+                buffer_info.offset = 0
+                buffer_info.size = sample_size
+                buffer_info.presentationTimeUs = v_extractor.getSampleTime()
+                buffer_info.flags = v_extractor.getSampleFlags()
+                muxer.writeSampleData(video_track_idx, buf, buffer_info)
+                v_extractor.advance()
+
+            # Copy audio track samples
+            while True:
+                sample_size = a_extractor.readSampleData(buf, 0)
+                if sample_size < 0:
+                    break
+                buffer_info.offset = 0
+                buffer_info.size = sample_size
+                buffer_info.presentationTimeUs = a_extractor.getSampleTime()
+                buffer_info.flags = a_extractor.getSampleFlags()
+                muxer.writeSampleData(audio_track_idx, buf, buffer_info)
+                a_extractor.advance()
+
+            muxer.stop()
+            muxer.release()
+            v_extractor.release()
+            a_extractor.release()
+
+            if tmp_output != output_path:
+                if output_path.exists():
+                    output_path.unlink()
+                tmp_output.rename(output_path)
+
+            print(f"[MediaMuxer] Android native mux successful -> {output_path.name}")
+            return True
+        except Exception as e:
+            print(f"[MediaMuxer] Native Android muxing notice: {e}")
+
+    # Fallback: system FFmpeg if available
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if ffmpeg_bin:
+        try:
+            import subprocess
+            cmd = [
+                ffmpeg_bin, "-y",
+                "-i", str(video_path.resolve()),
+                "-i", str(audio_path.resolve()),
+                "-c", "copy",
+                "-shortest",
+                str(output_path.resolve())
+            ]
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            if res.returncode == 0 and output_path.exists():
+                print(f"[MediaMuxer] System FFmpeg mux successful -> {output_path.name}")
+                return True
+        except Exception as fe:
+            print(f"[MediaMuxer] FFmpeg mux notice: {fe}")
+
+    return False
+
+
+def get_ydl_format_selector(selected_format: str, has_ffmpeg: bool = False) -> str:
+    """
+    Generate the precise yt-dlp format selector string based on user's chosen quality/audio option.
+    Ensures:
+      - Audio selections NEVER fall back to video streams (/best is omitted).
+      - 1080p / 720p prioritizes universal H.264 (avc1) + AAC (m4a) DASH streams for flawless muxing & playback.
+      - 360p selects fast lightweight progressive (18) or 360p streams.
+    """
+    is_audio = "Audio" in selected_format
+
+    if is_audio:
+        if "MP3" in selected_format and has_ffmpeg:
+            return "bestaudio/bestaudio[ext=m4a]/140/ba"
+        # Direct AAC M4A audio stream (format 140 is high-quality 128k AAC audio on YouTube)
+        # CRITICAL: Do NOT append /best, as that would fallback to video format 18!
+        return "140/bestaudio[ext=m4a]/bestaudio[acodec!=none]/bestaudio/ba"
+
+    # Video options
+    if "1080p" in selected_format or "Max Quality" in selected_format:
+        # 1080p Full HD (Max Quality)
+        return "bestvideo[height<=1080][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/bestvideo[height<=720][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/22/best[height<=1080]/18/best"
+    elif "720p" in selected_format:
+        # 720p HD MP4
+        return "bestvideo[height<=720][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/22/best[height<=720]/18/best"
+    elif "360p" in selected_format:
+        # 360p Fast MP4
+        return "18/bestvideo[height<=360][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=360]+bestaudio/best[height<=360]/best"
+    else:
+        # Fallback to high quality
+        return "bestvideo[height<=1080][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/bestvideo[height<=720][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/22/best[height<=1080]/18/best"
+
+
 class AndroidNativeAudioPlayer:
     """Wrapper around android.media.MediaPlayer for Android with background & screen-off playback support."""
     def __init__(self, source_path_or_url: str):
@@ -4648,6 +4809,9 @@ if KIVY_AVAILABLE:
                 if target_url:
                     self.url_input.text = target_url
 
+                if hasattr(self, "quality_spinner"):
+                    self.quality_spinner.text = fmt
+
                 chosen_indices = None
                 if is_plist and "selected_map" in locals():
                     chosen_indices = [k for k, v in selected_map.items() if v]
@@ -4761,12 +4925,6 @@ if KIVY_AVAILABLE:
                         "quiet": True,
                         "no_warnings": True,
                     }
-                    if plat == "YouTube":
-                        ydl_opts["extractor_args"] = {
-                            "youtube": {
-                                "player_client": ["android", "web"]
-                            }
-                        }
 
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         info = ydl.extract_info(url, download=False)
@@ -5839,39 +5997,20 @@ if KIVY_AVAILABLE:
                         "buffersize": 1048576,
                         "http_chunk_size": 10485760,
                     }
-                    if plat == "YouTube":
-                        base_ydl_opts["extractor_args"] = {
-                            "youtube": {
-                                "player_client": ["android", "web"]
-                            }
-                        }
+
+                    # Format selector resolution
+                    base_ydl_opts["format"] = get_ydl_format_selector(selected_format, has_ffmpeg=has_ffmpeg)
 
                     if is_audio:
-                        if "MP3" in selected_format:
-                            if has_ffmpeg:
-                                base_ydl_opts["format"] = "bestaudio/best"
-                                base_ydl_opts["postprocessors"] = [{
-                                    "key": "FFmpegExtractAudio",
-                                    "preferredcodec": "mp3",
-                                    "preferredquality": "320" if "320" in selected_format else "192",
-                                }]
-                            else:
-                                base_ydl_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio/best"
-                        else:
-                            base_ydl_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio/best"
+                        if "MP3" in selected_format and has_ffmpeg:
+                            base_ydl_opts["postprocessors"] = [{
+                                "key": "FFmpegExtractAudio",
+                                "preferredcodec": "mp3",
+                                "preferredquality": "320" if "320" in selected_format else "192",
+                            }]
                     else:
-                        if "360p" in selected_format:
-                            base_ydl_opts["format"] = "18/best[height<=360][vcodec!=none][acodec!=none]/best"
-                        elif "720p" in selected_format:
-                            if has_ffmpeg:
-                                base_ydl_opts["format"] = "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/22/best[height<=720]/18/best"
-                            else:
-                                base_ydl_opts["format"] = "22/best[height<=720][vcodec!=none][acodec!=none]/18/best"
-                        else:
-                            if has_ffmpeg:
-                                base_ydl_opts["format"] = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/22/best[height<=1080]/best[height<=720]/18/best"
-                            else:
-                                base_ydl_opts["format"] = "22/best[height<=1080][vcodec!=none][acodec!=none]/best[height<=720][vcodec!=none][acodec!=none]/18/best"
+                        if not has_ffmpeg:
+                            base_ydl_opts["allow_unplayable_formats"] = True
 
                     # Resolve items list
                     active_entries = []
@@ -5886,12 +6025,6 @@ if KIVY_AVAILABLE:
                             "quiet": True,
                             "no_warnings": True,
                         }
-                        if plat == "YouTube":
-                            flat_opts["extractor_args"] = {
-                                "youtube": {
-                                    "player_client": ["android", "web"]
-                                }
-                            }
                         with yt_dlp.YoutubeDL(flat_opts) as flat_ydl:
                             media_meta = flat_ydl.extract_info(url, download=False)
                             if not media_meta:
@@ -5983,7 +6116,48 @@ if KIVY_AVAILABLE:
                             continue
 
                         saved_path: Optional[Path] = None
-                        if "requested_downloads" in info and info["requested_downloads"]:
+
+                        # Check for separate DASH video + audio streams needing native Android / system muxing
+                        if not has_ffmpeg and not is_audio and info:
+                            v_track: Optional[Path] = None
+                            a_track: Optional[Path] = None
+                            cand_files: List[Path] = []
+
+                            if "requested_downloads" in info and info["requested_downloads"]:
+                                for rd in info["requested_downloads"]:
+                                    fp = rd.get("filepath")
+                                    if fp and Path(fp).is_file():
+                                        cand_files.append(Path(fp))
+
+                            if len(cand_files) < 2 and "requested_formats" in info:
+                                for rf in info["requested_formats"]:
+                                    fid = rf.get("format_id")
+                                    if fid:
+                                        for cp in target_dir.glob(f"*.f{fid}.*"):
+                                            if cp.is_file() and cp not in cand_files:
+                                                cand_files.append(cp)
+
+                            for cp in cand_files:
+                                suf = cp.suffix.lower()
+                                if suf in (".mp4", ".mkv", ".webm") and not v_track:
+                                    v_track = cp
+                                elif suf in (".m4a", ".aac", ".mp3", ".webm", ".opus") and not a_track:
+                                    a_track = cp
+
+                            if v_track and a_track and v_track.is_file() and a_track.is_file():
+                                final_mp4 = target_dir / (f"[{idx:02d}] {clean_title}.mp4" if total_count > 1 else f"{clean_title}.mp4")
+                                merged_ok = mux_video_audio_android(v_track, a_track, final_mp4)
+                                if merged_ok and final_mp4.is_file():
+                                    saved_path = final_mp4
+                                    try:
+                                        v_track.unlink(missing_ok=True)
+                                        a_track.unlink(missing_ok=True)
+                                    except Exception:
+                                        pass
+                                else:
+                                    saved_path = v_track
+
+                        if not saved_path and "requested_downloads" in info and info["requested_downloads"]:
                             fp = info["requested_downloads"][0].get("filepath")
                             if fp and Path(fp).is_file():
                                 saved_path = Path(fp)
@@ -6017,6 +6191,19 @@ if KIVY_AVAILABLE:
                                     except Exception:
                                         saved_path = p
                                     break
+
+                        # For audio downloads: ensure correct audio extension and clean any .f<id> artifacts
+                        if saved_path and saved_path.is_file() and is_audio:
+                            audio_target_ext = ".mp3" if ("MP3" in selected_format and has_ffmpeg) else ".m4a"
+                            if ".f" in saved_path.name or saved_path.suffix.lower() not in (".m4a", ".mp3", ".aac", ".opus", ".ogg"):
+                                proper_audio_name = f"[{idx:02d}] {clean_title}{audio_target_ext}" if total_count > 1 else f"{clean_title}{audio_target_ext}"
+                                proper_audio_path = target_dir / proper_audio_name
+                                try:
+                                    if not proper_audio_path.exists():
+                                        saved_path.rename(proper_audio_path)
+                                        saved_path = proper_audio_path
+                                except Exception:
+                                    pass
 
                         if saved_path and saved_path.exists():
                             if is_audio:
