@@ -36,6 +36,7 @@ env/
 .pytest_cache/
 .coverage
 htmlcov/
+.kivy/
 
 # User configurations / temporary files
 .msk_ytdl/

@@ -176,6 +176,62 @@ def test_find_downloaded_media_file_by_id_and_title(tmp_path):
         assert not_found is None
 
 
+def test_get_media_content_uri_safety():
+    from mobile_app import get_media_content_uri
+    from pathlib import Path
+    # On desktop or None, should safely return None
+    assert get_media_content_uri(None) is None
+    assert get_media_content_uri(Path("some_video.mp4")) is None
+
+
+def test_play_video_file_safety():
+    from mobile_app import play_video_file
+    from pathlib import Path
+    # Safe on None/empty
+    play_video_file(None)
+
+    with patch("mobile_app.open_media_file") as mock_open:
+        play_video_file(Path("my_test_video.mp4"), title="Test Title")
+        assert mock_open.called
+
+
+def test_android_notification_manager_media_playback():
+    from mobile_app import AndroidNotificationManager, get_notification_manager
+    mgr = get_notification_manager()
+    assert mgr is not None
+    assert isinstance(mgr, AndroidNotificationManager)
+
+    # Calling show_media_playback on desktop should not crash
+    mgr.show_media_playback("Test Song Title", is_playing=True, media_type="Song")
+    assert mgr._is_media_playing is True
+    assert mgr._current_media_title == "Test Song Title"
+
+    mgr.show_media_playback("Test Song Title", is_playing=False, media_type="Song")
+    assert mgr._is_media_playing is False
+
+    mgr.hide_media_playback()
+    assert mgr._is_media_playing is False
+
+
+def test_scan_media_file_safety(tmp_path):
+    from mobile_app import scan_media_file
+    # Safe on non-existent or empty
+    scan_media_file(None)
+    scan_media_file(tmp_path / "non_existent.mp4")
+
+    # Safe on actual file
+    sample_vid = tmp_path / "sample.mp4"
+    sample_vid.write_text("dummy")
+    scan_media_file(sample_vid)
+
+
+def test_sync_and_migrate_legacy_downloads_safety():
+    from mobile_app import sync_and_migrate_legacy_downloads
+    # Should run safely on desktop without crashing
+    sync_and_migrate_legacy_downloads()
+
+
+
 
 
 

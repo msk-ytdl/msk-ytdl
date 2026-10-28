@@ -431,7 +431,7 @@ def request_android_permissions():
             Permission.READ_EXTERNAL_STORAGE,
         ]
         # On Android 13+ (API 33+), granular media & notification permissions apply
-        for p in ("READ_MEDIA_VIDEO", "READ_MEDIA_AUDIO", "READ_MEDIA_IMAGES", "POST_NOTIFICATIONS"):
+        for p in ("READ_MEDIA_VIDEO", "READ_MEDIA_AUDIO", "READ_MEDIA_IMAGES", "POST_NOTIFICATIONS", "WAKE_LOCK"):
             if hasattr(Permission, p):
                 perms.append(getattr(Permission, p))
         request_permissions(perms)
@@ -451,9 +451,10 @@ def is_running_on_android() -> bool:
 
 def get_android_download_dir() -> Path:
     """
-    Resolve a guaranteed writable destination directory on Android.
-    Prefers public Downloads folder; falls back to app-specific external storage.
-    If running on desktop during testing/development, uses user's Downloads/YouTube directory.
+    Resolve public writable destination directory on Android.
+    Prefers public Downloads/Movies folders so downloaded files are immediately visible
+    in the phone Gallery, Google Photos, Files, and third-party media players.
+    Falls back to app-specific external storage if public directory is blocked.
     """
     if not is_running_on_android():
         desktop_dir = Path.home() / "Downloads" / "YouTube"
@@ -465,27 +466,50 @@ def get_android_download_dir() -> Path:
 
     candidates = []
 
-    # 1. Primary on Android: App's private external files directory via PyJnius (100% writable on all Android versions 4.4 - 15 without permission blocks)
+    # 1. Primary on Android: Public standard Download directory via Environment
     try:
         from jnius import autoclass
-        PythonActivity = autoclass("org.kivy.android.PythonActivity")
         Environment = autoclass("android.os.Environment")
-        context = PythonActivity.mActivity
-        ext_dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-        if ext_dir:
-            candidates.append(Path(ext_dir.getAbsolutePath()))
+        pub_dl = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        if pub_dl:
+            candidates.append(Path(pub_dl.getAbsolutePath()))
     except Exception:
         pass
 
-    # 2. Public Download directory
+    # 2. Standard public Android paths (guaranteed gallery indexing)
     candidates.extend([
         Path("/storage/emulated/0/Download"),
         Path("/sdcard/Download"),
         Path("/storage/emulated/0/Download/YouTube"),
         Path("/sdcard/Download/YouTube"),
+        Path("/storage/emulated/0/Movies"),
+        Path("/sdcard/Movies"),
     ])
 
-    # 3. App user_data_dir fallback
+    # 3. Public Movies directory via Environment
+    try:
+        from jnius import autoclass
+        Environment = autoclass("android.os.Environment")
+        pub_mov = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
+        if pub_mov:
+            candidates.append(Path(pub_mov.getAbsolutePath()))
+    except Exception:
+        pass
+
+    # 4. Fallback: App's private external files directory if public storage is permission-blocked
+    try:
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        Environment = autoclass("android.os.Environment")
+        context = PythonActivity.mActivity
+        if context:
+            ext_dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            if ext_dir:
+                candidates.append(Path(ext_dir.getAbsolutePath()))
+    except Exception:
+        pass
+
+    # 5. App user_data_dir fallback
     try:
         if KIVY_AVAILABLE:
             from kivy.app import App
@@ -510,8 +534,54 @@ def get_android_download_dir() -> Path:
     return Path.home()
 
 
+def sync_and_migrate_legacy_downloads():
+    """
+    Migrate media files previously downloaded to the app-private directory
+    (/Android/data/.../files/Download) to the public Downloads folder so they
+    immediately appear in the phone Gallery and system media players.
+    """
+    if not is_running_on_android():
+        return
+    try:
+        from jnius import autoclass
+        import shutil
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        Environment = autoclass("android.os.Environment")
+        context = PythonActivity.mActivity
+        if not context:
+            return
+        ext_dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+        if not ext_dir:
+            return
+        private_path = Path(ext_dir.getAbsolutePath())
+        if not private_path.exists():
+            return
+
+        target_dir = get_android_download_dir()
+        if not target_dir or target_dir == private_path:
+            return
+
+        media_exts = ("*.mp4", "*.m4a", "*.mp3", "*.mkv", "*.webm", "*.wav", "*.ogg", "*.opus", "*.flac")
+        for ext in media_exts:
+            for f in private_path.glob(ext):
+                if f.is_file() and not f.name.endswith(".part") and not f.name.endswith(".ytdl"):
+                    target_file = target_dir / f.name
+                    try:
+                        if not target_file.exists():
+                            shutil.copy2(str(f), str(target_file))
+                            f.unlink(missing_ok=True)
+                            print(f"[StorageMigration] Migrated {f.name} to public storage: {target_file}")
+                        scan_media_file(target_file)
+                    except Exception as me:
+                        print(f"[StorageMigration] Migration notice for {f.name}: {me}")
+    except Exception as e:
+        print(f"[StorageMigration] Migration error: {e}")
+
+
 def scan_media_file(filepath: Path):
-    """Notify Android's MediaScannerConnection so the file appears or is removed from Gallery/Music players."""
+    """Notify Android's MediaScanner and MediaStore so the file immediately appears in phone Gallery/Music apps."""
+    if not filepath or not filepath.exists():
+        return
     try:
         if is_running_on_android():
             from jnius import autoclass
@@ -519,8 +589,38 @@ def scan_media_file(filepath: Path):
             MediaScannerConnection = autoclass("android.media.MediaScannerConnection")
             ctx = PythonActivity.mActivity
             if ctx:
-                MediaScannerConnection.scanFile(ctx, [str(filepath.resolve())], None, None)
-                print(f"[Android] MediaScannerConnection synced: {filepath.name}")
+                path_str = str(filepath.resolve())
+                ext = filepath.suffix.lower()
+
+                # Determine accurate MIME type for Android Gallery / Music index
+                mime = None
+                if ext in (".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".3gp"):
+                    mime = "video/mp4" if ext == ".mp4" else f"video/{ext.lstrip('.')}"
+                elif ext in (".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac"):
+                    mime = "audio/mpeg" if ext == ".mp3" else f"audio/{ext.lstrip('.')}"
+
+                # 1. MediaScannerConnection scanFile
+                try:
+                    MediaScannerConnection.scanFile(
+                        ctx,
+                        [path_str],
+                        [mime] if mime else None,
+                        None
+                    )
+                    print(f"[Android] MediaScannerConnection synced: {filepath.name} ({mime})")
+                except Exception as se:
+                    print(f"[Android] MediaScannerConnection notice: {se}")
+
+                # 2. Broadcast ACTION_MEDIA_SCANNER_SCAN_FILE (Supported on all Android versions and OEM ROMs)
+                try:
+                    Intent = autoclass("android.content.Intent")
+                    Uri = autoclass("android.net.Uri")
+                    File = autoclass("java.io.File")
+                    scan_intent = Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE)
+                    scan_intent.setData(Uri.fromFile(File(path_str)))
+                    ctx.sendBroadcast(scan_intent)
+                except Exception:
+                    pass
     except Exception as e:
         print(f"[Android] MediaScanner notice: {e}")
 
@@ -587,10 +687,23 @@ class AndroidNativeAudioPlayer:
             self._mp = None
             self.state = "stop"
 
+    @property
+    def is_playing(self) -> bool:
+        if self._mp:
+            try:
+                return bool(self._mp.isPlaying())
+            except Exception:
+                return False
+        return False
+
     def get_pos(self):
         if self._mp:
             try:
-                return (self._mp.getCurrentPosition() or 0) / 1000.0
+                pos = (self._mp.getCurrentPosition() or 0) / 1000.0
+                if self.state == "play" and not self._mp.isPlaying():
+                    if self._duration > 0 and pos >= (self._duration - 0.6):
+                        self.state = "stop"
+                return pos
             except Exception:
                 return 0.0
         return 0.0
@@ -607,8 +720,77 @@ class AndroidNativeAudioPlayer:
         return self._duration
 
 
+def get_media_content_uri(filepath: Path):
+    """Resolve a content:// URI from Android MediaStore or FileProvider so external players can open it."""
+    if not is_running_on_android() or not filepath:
+        return None
+    try:
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        activity = PythonActivity.mActivity
+        if not activity:
+            return None
+
+        path_str = str(filepath.resolve())
+        ext = filepath.suffix.lower()
+        is_video = ext in (".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".3gp")
+        is_audio = ext in (".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac")
+
+        # 1. Query Android MediaStore for existing content URI
+        try:
+            MediaStore = autoclass("android.provider.MediaStore")
+            ContentUris = autoclass("android.content.ContentUris")
+            resolver = activity.getContentResolver()
+
+            table_uri = None
+            if is_video:
+                table_uri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            elif is_audio:
+                table_uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            else:
+                table_uri = MediaStore.Files.getContentUri("external")
+
+            cursor = resolver.query(
+                table_uri,
+                ["_id"],
+                "_data = ?",
+                [path_str],
+                None
+            )
+            if cursor:
+                try:
+                    if cursor.moveToFirst():
+                        id_idx = cursor.getColumnIndexOrThrow("_id")
+                        row_id = cursor.getLong(id_idx)
+                        content_uri = ContentUris.withAppendedId(table_uri, row_id)
+                        cursor.close()
+                        return content_uri
+                finally:
+                    try:
+                        cursor.close()
+                    except Exception:
+                        pass
+        except Exception as me:
+            print(f"[ContentURI] MediaStore query notice: {me}")
+
+        # 2. Try FileProvider if configured
+        try:
+            FileProvider = autoclass("androidx.core.content.FileProvider")
+            File = autoclass("java.io.File")
+            pkg = activity.getPackageName()
+            file_uri = FileProvider.getUriForFile(activity, f"{pkg}.fileprovider", File(path_str))
+            if file_uri:
+                return file_uri
+        except Exception:
+            pass
+
+    except Exception as e:
+        print(f"[ContentURI] Resolution notice: {e}")
+    return None
+
+
 def open_media_file(filepath: Path):
-    """Launch the downloaded video or song in the default Android or desktop player."""
+    """Launch downloaded video, song, or APK in default external player or installer."""
     if not filepath:
         return
     try:
@@ -618,10 +800,10 @@ def open_media_file(filepath: Path):
             Intent = autoclass("android.content.Intent")
             Uri = autoclass("android.net.Uri")
             File = autoclass("java.io.File")
-            Build = autoclass("android.os.Build")
             activity = PythonActivity.mActivity
 
-            file_obj = File(str(filepath.resolve()))
+            path_str = str(filepath.resolve())
+            file_obj = File(path_str)
             intent = Intent(Intent.ACTION_VIEW)
 
             ext = filepath.suffix.lower()
@@ -634,37 +816,32 @@ def open_media_file(filepath: Path):
             else:
                 mime_type = "*/*"
 
-            file_uri = None
-            if Build.VERSION.SDK_INT >= 24:
-                try:
-                    FileProvider = autoclass("androidx.core.content.FileProvider")
-                    pkg = activity.getPackageName()
-                    file_uri = FileProvider.getUriForFile(activity, f"{pkg}.fileprovider", file_obj)
-                except Exception as fe:
-                    print(f"[OpenMedia] FileProvider notice: {fe}")
+            # 1. Resolve content:// URI from MediaStore / FileProvider
+            target_uri = get_media_content_uri(filepath)
 
-            if file_uri is None:
+            # 2. Fallback to file:// with StrictMode bypass if content URI unavailable
+            if target_uri is None:
                 try:
                     StrictMode = autoclass("android.os.StrictMode")
                     builder = autoclass("android.os.StrictMode$VmPolicy$Builder")()
                     StrictMode.setVmPolicy(builder.build())
                 except Exception:
                     pass
-                file_uri = Uri.fromFile(file_obj)
+                target_uri = Uri.fromFile(file_obj)
 
-            intent.setDataAndType(file_uri, mime_type)
+            intent.setDataAndType(target_uri, mime_type)
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
 
-            # Explicitly grant URI permission to resolving activities
+            # Grant explicit URI permissions to resolving apps
             try:
                 pm = activity.getPackageManager()
-                matches = pm.queryIntentActivities(intent, 65536)  # MATCH_DEFAULT_ONLY
+                matches = pm.queryIntentActivities(intent, 65536)
                 if matches:
                     for i in range(matches.size()):
                         target_pkg = matches.get(i).activityInfo.packageName
-                        activity.grantUriPermission(target_pkg, file_uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        activity.grantUriPermission(target_pkg, target_uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             except Exception as ge:
                 print(f"[OpenMedia] Grant permission notice: {ge}")
 
@@ -691,6 +868,190 @@ def open_media_file(filepath: Path):
                 subprocess.Popen(["xdg-open", path_str])
     except Exception as e:
         print(f"[OpenMedia] Error opening file {filepath.name}: {e}")
+
+
+def play_video_file(filepath: Path, title: Optional[str] = None):
+    """
+    Play downloaded video file smoothly.
+    On Android:
+      Launches a high-performance in-app hardware-accelerated VideoView Dialog with
+      MediaController (play, pause, seekbar, duration), [EXTERNAL PLAYER] launcher,
+      and shows live media playback notification in the notification bar.
+    On Desktop:
+      Launches system video player and updates media notification.
+    """
+    if not filepath:
+        return
+
+    clean_title = safe_display_text(title or filepath.stem)
+    notif_mgr = get_notification_manager()
+
+    if is_running_on_android():
+        try:
+            from jnius import autoclass
+            from android.runnable import run_on_ui_thread
+
+            @run_on_ui_thread
+            def _launch_android_local_video_player():
+                try:
+                    PythonActivity = autoclass("org.kivy.android.PythonActivity")
+                    activity = PythonActivity.mActivity
+                    Dialog = autoclass("android.app.Dialog")
+                    VideoView = autoclass("android.widget.VideoView")
+                    MediaController = autoclass("android.widget.MediaController")
+                    LinearLayout = autoclass("android.widget.LinearLayout")
+                    FrameLayout = autoclass("android.widget.FrameLayout")
+                    TextView = autoclass("android.widget.TextView")
+                    Button = autoclass("android.widget.Button")
+                    Gravity = autoclass("android.view.Gravity")
+                    Color = autoclass("android.graphics.Color")
+                    LayoutParams = autoclass("android.widget.LinearLayout$LayoutParams")
+                    FrameLayoutParams = autoclass("android.widget.FrameLayout$LayoutParams")
+                    Window = autoclass("android.view.Window")
+                    WindowManagerLayoutParams = autoclass("android.view.WindowManager$LayoutParams")
+
+                    dialog = Dialog(activity)
+                    try:
+                        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+                    except Exception:
+                        pass
+
+                    root = LinearLayout(activity)
+                    root.setOrientation(LinearLayout.VERTICAL)
+                    root.setBackgroundColor(Color.BLACK)
+
+                    # Top bar: Title + [🌐 EXTERNAL] + [✕ CLOSE]
+                    header = LinearLayout(activity)
+                    header.setOrientation(LinearLayout.HORIZONTAL)
+                    header.setBackgroundColor(Color.parseColor("#171D27"))
+                    header.setGravity(Gravity.CENTER_VERTICAL)
+                    h_params = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
+                    header.setLayoutParams(h_params)
+                    header.setPadding(24, 14, 24, 14)
+
+                    tv = TextView(activity)
+                    disp_t = (clean_title[:32] + "...") if len(clean_title) > 34 else clean_title
+                    tv.setText(f"🎬 {disp_t}")
+                    tv.setTextColor(Color.parseColor("#FFD54F"))
+                    tv.setTextSize(14)
+                    tv_params = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1.0)
+                    tv.setLayoutParams(tv_params)
+                    header.addView(tv)
+
+                    # External player button
+                    open_ext_btn = Button(activity)
+                    open_ext_btn.setText("🌐 EXTERNAL")
+                    open_ext_btn.setTextColor(Color.WHITE)
+                    open_ext_btn.setTextSize(11)
+                    open_ext_btn.setBackgroundColor(Color.parseColor("#1976D2"))
+                    open_ext_btn.setPadding(16, 6, 16, 6)
+                    ext_params = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT)
+                    ext_params.setMargins(0, 0, 12, 0)
+                    open_ext_btn.setLayoutParams(ext_params)
+
+                    close_btn = Button(activity)
+                    close_btn.setText("✕ CLOSE")
+                    close_btn.setTextColor(Color.WHITE)
+                    close_btn.setTextSize(11)
+                    close_btn.setBackgroundColor(Color.parseColor("#E53935"))
+                    close_btn.setPadding(16, 6, 16, 6)
+                    close_btn.setLayoutParams(LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
+
+                    header.addView(open_ext_btn)
+                    header.addView(close_btn)
+                    root.addView(header)
+
+                    # Video container
+                    video_frame = FrameLayout(activity)
+                    f_params = LayoutParams(LayoutParams.MATCH_PARENT, 0, 1.0)
+                    video_frame.setLayoutParams(f_params)
+
+                    video_view = VideoView(activity)
+                    vv_params = FrameLayoutParams(FrameLayoutParams.MATCH_PARENT, FrameLayoutParams.MATCH_PARENT)
+                    vv_params.gravity = Gravity.CENTER
+                    video_view.setLayoutParams(vv_params)
+
+                    mc = MediaController(activity)
+                    mc.setAnchorView(video_view)
+                    video_view.setMediaController(mc)
+
+                    path_str = str(filepath.resolve())
+                    video_view.setVideoPath(path_str)
+                    video_frame.addView(video_view)
+                    root.addView(video_frame)
+
+                    dialog.setContentView(root)
+
+                    win = dialog.getWindow()
+                    if win:
+                        win.setLayout(
+                            WindowManagerLayoutParams.MATCH_PARENT,
+                            WindowManagerLayoutParams.MATCH_PARENT
+                        )
+
+                    from jnius import PythonJavaClass, java_method
+
+                    class _VideoDialogListener(PythonJavaClass):
+                        __javainterfaces__ = ["android/view/View$OnClickListener"]
+
+                        def __init__(self, action):
+                            super().__init__()
+                            self.action = action
+
+                        @java_method("(Landroid/view/View;)V")
+                        def onClick(self, view):
+                            if self.action == "close":
+                                try:
+                                    video_view.stopPlayback()
+                                except Exception:
+                                    pass
+                                notif_mgr.hide_media_playback()
+                                dialog.dismiss()
+                            elif self.action == "external":
+                                try:
+                                    video_view.pause()
+                                except Exception:
+                                    pass
+                                open_media_file(filepath)
+
+                    dialog._close_listener = _VideoDialogListener("close")
+                    close_btn.setOnClickListener(dialog._close_listener)
+
+                    dialog._ext_listener = _VideoDialogListener("external")
+                    open_ext_btn.setOnClickListener(dialog._ext_listener)
+
+                    class _VideoDismissListener(PythonJavaClass):
+                        __javainterfaces__ = ["android/content/DialogInterface$OnDismissListener"]
+
+                        @java_method("(Landroid/content/DialogInterface;)V")
+                        def onDismiss(self, d):
+                            try:
+                                video_view.stopPlayback()
+                            except Exception:
+                                pass
+                            notif_mgr.hide_media_playback()
+
+                    dialog._dismiss_listener = _VideoDismissListener()
+                    dialog.setOnDismissListener(dialog._dismiss_listener)
+
+                    # Show media notification in notification bar!
+                    notif_mgr.show_media_playback(clean_title, is_playing=True, media_type="Video")
+
+                    video_view.start()
+                    dialog.show()
+
+                except Exception as inner_e:
+                    print(f"[LocalVideoPlayer] Inner launch error: {inner_e}")
+                    open_media_file(filepath)
+
+            _launch_android_local_video_player()
+        except Exception as e:
+            print(f"[LocalVideoPlayer] Error: {e}")
+            open_media_file(filepath)
+    else:
+        # Desktop
+        notif_mgr.show_media_playback(clean_title, is_playing=True, media_type="Video")
+        open_media_file(filepath)
 
 
 def find_downloaded_media_file(title: Optional[str] = None, item_id: Optional[str] = None) -> Optional[Path]:
@@ -891,6 +1252,7 @@ def play_online_video(video_url: str, title: str = "Video Player"):
                                     self.wv.loadUrl("about:blank")
                                 except Exception:
                                     pass
+                                get_notification_manager().hide_media_playback()
                                 self.d.dismiss()
                             elif self.action_type == "open":
                                 try:
@@ -906,6 +1268,20 @@ def play_online_video(video_url: str, title: str = "Video Player"):
 
                     dialog._open_listener = _PlayerButtonListener("open", dialog, webview, watch_url)
                     open_app_btn.setOnClickListener(dialog._open_listener)
+
+                    class _OnlineDismissListener(PythonJavaClass):
+                        __javainterfaces__ = ["android/content/DialogInterface$OnDismissListener"]
+
+                        @java_method("(Landroid/content/DialogInterface;)V")
+                        def onDismiss(self, d):
+                            try:
+                                webview.loadUrl("about:blank")
+                            except Exception:
+                                pass
+                            get_notification_manager().hide_media_playback()
+
+                    dialog._dismiss_listener = _OnlineDismissListener()
+                    dialog.setOnDismissListener(dialog._dismiss_listener)
 
                     header.addView(open_app_btn)
                     header.addView(close_btn)
@@ -940,6 +1316,9 @@ def play_online_video(video_url: str, title: str = "Video Player"):
                     w = dialog.getWindow()
                     if w:
                         w.setLayout(WindowManagerLayoutParams.MATCH_PARENT, WindowManagerLayoutParams.MATCH_PARENT)
+
+                    # Show media notification in notification drawer
+                    get_notification_manager().show_media_playback(clean_title, is_playing=True, media_type="Online Video")
                     dialog.show()
                 except Exception as inner_e:
                     print(f"[Player] Android native dialog error: {inner_e}")
@@ -954,6 +1333,7 @@ def play_online_video(video_url: str, title: str = "Video Player"):
             print(f"[Player] Android in-app player setup notice: {e}")
 
     # Desktop In-App Player (Windows / macOS / Linux)
+    get_notification_manager().show_media_playback(clean_title, is_playing=True, media_type="Online Video")
     try:
         import subprocess
         safe_t = re.sub(r'["\'\\]', '', clean_title)[:55]
@@ -1120,13 +1500,17 @@ def embed_audio_metadata(audio_path: Path, title: str, uploader: str, thumbnail_
 
 
 class AndroidNotificationManager:
-    """Manages ongoing and completed download notifications in the Android notification drawer."""
+    """Manages ongoing/completed download notifications and media playback notifications in the Android notification drawer."""
     def __init__(self):
         self.channel_id = "msk_ytdl_downloads"
+        self.media_channel_id = "msk_ytdl_playback"
         self.notification_id = 4242
+        self.media_notification_id = 7878
         self.manager = None
         self.context = None
         self._init_done = False
+        self._current_media_title = ""
+        self._is_media_playing = False
 
     def _init_android(self) -> bool:
         if self._init_done:
@@ -1144,11 +1528,23 @@ class AndroidNotificationManager:
             Build_VERSION = autoclass("android.os.Build$VERSION")
             if Build_VERSION.SDK_INT >= 26:
                 NotificationChannel = autoclass("android.app.NotificationChannel")
+
+                # 1. Channel for downloads
                 channel_name = autoclass("java.lang.String")("MSK YTDL Downloads")
                 importance_low = 2  # IMPORTANCE_LOW for quiet ongoing updates
-                channel = NotificationChannel(self.channel_id, channel_name, importance_low)
-                channel.setDescription("Progress and status for YouTube downloads")
-                self.manager.createNotificationChannel(channel)
+                dl_channel = NotificationChannel(self.channel_id, channel_name, importance_low)
+                dl_channel.setDescription("Progress and status for YouTube downloads")
+                self.manager.createNotificationChannel(dl_channel)
+
+                # 2. Channel for media playback controls
+                media_name = autoclass("java.lang.String")("MSK Media Playback")
+                media_channel = NotificationChannel(self.media_channel_id, media_name, importance_low)
+                media_channel.setDescription("Displays playback status and controls for active songs and videos")
+                try:
+                    media_channel.setShowBadge(False)
+                except Exception:
+                    pass
+                self.manager.createNotificationChannel(media_channel)
 
             self._init_done = True
             return True
@@ -1197,6 +1593,89 @@ class AndroidNotificationManager:
                 self.manager.cancel(self.notification_id)
         except Exception:
             pass
+
+    def show_media_playback(self, title: str, is_playing: bool = True, media_type: str = "Audio"):
+        """Display media playback status in the Android notification bar with return-to-app action."""
+        self._current_media_title = title
+        self._is_media_playing = is_playing
+        try:
+            if not self._init_android():
+                state_str = "Playing" if is_playing else "Paused"
+                print(f"[Notification] Media ({media_type}) {state_str}: {safe_display_text(title)}")
+                return
+
+            from jnius import autoclass
+            NotificationBuilder = autoclass("android.app.Notification$Builder")
+            Build_VERSION = autoclass("android.os.Build$VERSION")
+            Intent = autoclass("android.content.Intent")
+            PendingIntent = autoclass("android.app.PendingIntent")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+
+            if Build_VERSION.SDK_INT >= 26:
+                builder = NotificationBuilder(self.context, self.media_channel_id)
+            else:
+                builder = NotificationBuilder(self.context)
+
+            clean_title = safe_display_text(title)
+            state_text = f"▶ Playing • MSK {media_type} Player" if is_playing else f"⏸ Paused • MSK {media_type} Player"
+
+            builder.setContentTitle(clean_title)
+            builder.setContentText(state_text)
+            builder.setSmallIcon(self.context.getApplicationInfo().icon)
+            builder.setOngoing(is_playing)
+            builder.setAutoCancel(not is_playing)
+
+            # Public lock screen visibility (1 = VISIBILITY_PUBLIC)
+            try:
+                builder.setVisibility(1)
+            except Exception:
+                pass
+
+            # Tap notification in drawer to bring app back to the front
+            try:
+                app_intent = Intent(self.context, PythonActivity)
+                app_intent.setAction(Intent.ACTION_MAIN)
+                app_intent.addCategory(Intent.CATEGORY_LAUNCHER)
+                app_intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+
+                flags = 0x08000000  # FLAG_UPDATE_CURRENT
+                if Build_VERSION.SDK_INT >= 23:
+                    flags |= 0x04000000  # FLAG_IMMUTABLE
+
+                pending_intent = PendingIntent.getActivity(self.context, 0, app_intent, flags)
+                builder.setContentIntent(pending_intent)
+            except Exception as pe:
+                print(f"[Notification] PendingIntent notice: {pe}")
+
+            # MediaStyle if available
+            try:
+                MediaStyle = autoclass("android.app.Notification$MediaStyle")
+                builder.setStyle(MediaStyle())
+            except Exception:
+                pass
+
+            self.manager.notify(self.media_notification_id, builder.build())
+        except Exception as e:
+            print(f"[Notification] Media playback notice: {e}")
+
+    def hide_media_playback(self):
+        """Dismiss media playback notification when playback is stopped or closed."""
+        self._is_media_playing = False
+        try:
+            if self._init_android() and self.manager:
+                self.manager.cancel(self.media_notification_id)
+        except Exception:
+            pass
+
+
+_GLOBAL_NOTIFICATION_MANAGER: Optional[AndroidNotificationManager] = None
+
+def get_notification_manager() -> AndroidNotificationManager:
+    """Retrieve shared global notification manager instance."""
+    global _GLOBAL_NOTIFICATION_MANAGER
+    if _GLOBAL_NOTIFICATION_MANAGER is None:
+        _GLOBAL_NOTIFICATION_MANAGER = AndroidNotificationManager()
+    return _GLOBAL_NOTIFICATION_MANAGER
 
 
 if KIVY_AVAILABLE:
@@ -1672,7 +2151,7 @@ if KIVY_AVAILABLE:
             except Exception:
                 pass
 
-            self.notification_manager = AndroidNotificationManager()
+            self.notification_manager = get_notification_manager()
             self.current_preview_url = ""
             self.current_preview_info: Optional[Dict[str, Any]] = None
             self.last_clipboard_text = ""
@@ -1759,6 +2238,7 @@ if KIVY_AVAILABLE:
             # Initial startup tasks
             Clock.schedule_once(self.check_initial_intent, 0.4)
             Clock.schedule_once(lambda dt: self.refresh_library(), 0.6)
+            Clock.schedule_once(lambda dt: sync_and_migrate_legacy_downloads(), 1.0)
             Clock.schedule_once(lambda dt: self.populate_home_recommendations(), 0.5)
             Clock.schedule_interval(self.check_clipboard, 2.5)
 
@@ -2269,7 +2749,11 @@ if KIVY_AVAILABLE:
                     item_id=media_info.get("id")
                 )
                 if local_file and local_file.exists():
-                    open_media_file(local_file)
+                    is_aud = local_file.suffix.lower() in (".mp3", ".m4a", ".wav", ".ogg", ".opus", ".flac", ".aac")
+                    if is_aud:
+                        self.play_audio_track(local_file)
+                    else:
+                        self.play_video_file(local_file)
                 else:
                     self.open_video_player_modal(media_info)
 
@@ -2533,8 +3017,8 @@ if KIVY_AVAILABLE:
                 return
             self.audio_playlist = audio_files
             self.audio_index = 0
-            open_media_file(self.audio_playlist[0])
-            self.update_status(f"[color=#00E676]Playing in Device Player:[/color] {safe_display_text(self.audio_playlist[0].stem)}", 0)
+            self.play_audio_track(self.audio_playlist[0])
+            self.update_status(f"[color=#00E676]Playing in Playlist:[/color] {safe_display_text(self.audio_playlist[0].stem)}", 0)
 
         def set_downloads_filter(self, filter_type: str):
             self.active_filter = filter_type
@@ -3074,6 +3558,7 @@ if KIVY_AVAILABLE:
                             if self.current_sound:
                                 self.is_audio_playing = True
                                 self.current_sound.play()
+                                self.notification_manager.show_media_playback(title, is_playing=True, media_type="Background Audio")
                                 if not self.player_clock_event:
                                     self.player_clock_event = Clock.schedule_interval(self._update_player_progress, 0.4)
                                 self.update_status("[color=#00E676]🎧 Background audio active![/color]", 100)
@@ -3697,7 +4182,11 @@ if KIVY_AVAILABLE:
                 if instance.collide_point(*touch.pos):
                     if downloaded_file and downloaded_file.exists():
                         modal.dismiss()
-                        open_media_file(downloaded_file)
+                        is_aud = downloaded_file.suffix.lower() in (".mp3", ".m4a", ".wav", ".ogg", ".opus", ".flac", ".aac")
+                        if is_aud:
+                            self.play_audio_track(downloaded_file)
+                        else:
+                            self.play_video_file(downloaded_file)
                     else:
                         play_online_video(media_item.get("url", ""), title=clean_title)
                     return True
@@ -3738,16 +4227,24 @@ if KIVY_AVAILABLE:
             btn_col = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None, height=dp(130))
 
             if downloaded_file and downloaded_file.exists():
+                is_aud = downloaded_file.suffix.lower() in (".mp3", ".m4a", ".wav", ".ogg", ".opus", ".flac", ".aac")
+                btn_txt = "▶ PLAY OFFLINE (AUDIO)" if is_aud else "▶ PLAY OFFLINE (VIDEO)"
                 play_inapp_btn = IconActionButton(
                     icon_path="play.png",
-                    text="▶ PLAY IN DEVICE MEDIA PLAYER (OFFLINE)",
+                    text=btn_txt,
                     bg_color=(0.08, 0.55, 0.25, 1.0),
                     text_color=(1, 1, 1, 1),
                     font_size="11.5sp",
                     size_hint_y=None,
                     height=dp(38),
                 )
-                play_inapp_btn.bind(on_press=lambda ins, f=downloaded_file: (modal.dismiss(), open_media_file(f)))
+                def on_modal_play_offline(ins, f=downloaded_file, aud=is_aud):
+                    modal.dismiss()
+                    if aud:
+                        self.play_audio_track(f)
+                    else:
+                        self.play_video_file(f)
+                play_inapp_btn.bind(on_press=on_modal_play_offline)
             else:
                 play_inapp_btn = IconActionButton(
                     icon_path="play.png",
@@ -4452,10 +4949,38 @@ if KIVY_AVAILABLE:
                 if not target_dir.exists():
                     target_dir.mkdir(parents=True, exist_ok=True)
 
+                search_dirs = [target_dir]
+                if is_running_on_android():
+                    try:
+                        from jnius import autoclass
+                        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+                        Environment = autoclass("android.os.Environment")
+                        ctx = PythonActivity.mActivity
+                        if ctx:
+                            ext_d = ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                            if ext_d:
+                                p_d = Path(ext_d.getAbsolutePath())
+                                if p_d.exists() and p_d not in search_dirs:
+                                    search_dirs.append(p_d)
+                    except Exception:
+                        pass
+                    for std_dir in ("/storage/emulated/0/Download", "/storage/emulated/0/Movies", "/storage/emulated/0/Music", "/sdcard/Download"):
+                        sp = Path(std_dir)
+                        if sp.exists() and sp not in search_dirs:
+                            search_dirs.append(sp)
+
                 # Scan media files
+                scanned_names = set()
                 all_files: List[Path] = []
-                for ext in ("*.mp4", "*.m4a", "*.mp3", "*.mkv", "*.webm", "*.wav", "*.ogg", "*.opus", "*.flac", "*.avi", "*.mov"):
-                    all_files.extend(target_dir.glob(ext))
+                media_exts = ("*.mp4", "*.m4a", "*.mp3", "*.mkv", "*.webm", "*.wav", "*.ogg", "*.opus", "*.flac", "*.avi", "*.mov")
+                for d in search_dirs:
+                    if d and d.exists():
+                        for ext in media_exts:
+                            for p in d.glob(ext):
+                                if p.is_file() and not p.name.endswith(".part") and not p.name.endswith(".ytdl"):
+                                    if p.name not in scanned_names:
+                                        scanned_names.add(p.name)
+                                        all_files.append(p)
 
                 # Sort newest first
                 all_files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
@@ -4501,6 +5026,7 @@ if KIVY_AVAILABLE:
                     is_audio_file = media_path.suffix.lower() in (".mp3", ".m4a", ".wav", ".ogg", ".opus", ".flac", ".aac")
                     tag_str = "[AUDIO]" if is_audio_file else "[VIDEO]"
                     tag_color = "#FFA000" if is_audio_file else "#00E676"
+                    player_mode_str = "Mini Music Player" if is_audio_file else "In-App Video Player"
 
                     row = StyledCard(
                         orientation="horizontal",
@@ -4514,7 +5040,7 @@ if KIVY_AVAILABLE:
                     clean_name = safe_display_text(media_path.stem)
 
                     item_lbl = Label(
-                        text=f"[b][color={tag_color}]{tag_str}[/color] {clean_name}[/b]\n[size=10sp][color=#90CAF9]{size_str}[/color] • [color=#78909C]{media_path.suffix.upper()}[/color] • [color=#81D4FA]Device Player[/color][/size]",
+                        text=f"[b][color={tag_color}]{tag_str}[/color] {clean_name}[/b]\n[size=10sp][color=#90CAF9]{size_str}[/color] • [color=#78909C]{media_path.suffix.upper()}[/color] • [color=#81D4FA]{player_mode_str}[/color][/size]",
                         markup=True,
                         font_size="11.5sp",
                         color=(0.92, 0.94, 0.98, 1.0),
@@ -4525,25 +5051,40 @@ if KIVY_AVAILABLE:
                         shorten_from="right",
                     )
                     item_lbl.bind(size=item_lbl.setter("text_size"))
-                    def on_item_click(instance, touch, p=media_path):
+                    def on_item_click(instance, touch, p=media_path, is_aud=is_audio_file):
                         if instance.collide_point(*touch.pos):
-                            open_media_file(p)
+                            if is_aud:
+                                self.play_audio_track(p)
+                            else:
+                                self.play_video_file(p)
                             return True
                         return False
                     item_lbl.bind(on_touch_down=on_item_click)
                     row.add_widget(item_lbl)
 
-                    # PLAY BUTTON with icon - Always plays in device media player
-                    play_btn = IconActionButton(
-                        icon_path="play.png",
-                        text="PLAY",
-                        font_size="11sp",
-                        size_hint=(None, None),
-                        size=(dp(72), dp(34)),
-                        bg_color=(0.08, 0.50, 0.24, 1.0),
-                        text_color=(1, 1, 1, 1),
-                    )
-                    play_btn.bind(on_press=lambda ins, p=media_path: open_media_file(p))
+                    # PLAY BUTTON with icon - Plays audio in mini player, videos in native video player
+                    if is_audio_file:
+                        play_btn = IconActionButton(
+                            icon_path="play.png",
+                            text="PLAY",
+                            font_size="11sp",
+                            size_hint=(None, None),
+                            size=(dp(72), dp(34)),
+                            bg_color=(0.10, 0.55, 0.28, 1.0),
+                            text_color=(1, 1, 1, 1),
+                        )
+                        play_btn.bind(on_press=lambda ins, p=media_path: self.play_audio_track(p))
+                    else:
+                        play_btn = IconActionButton(
+                            icon_path="play.png",
+                            text="PLAY",
+                            font_size="11sp",
+                            size_hint=(None, None),
+                            size=(dp(72), dp(34)),
+                            bg_color=(0.08, 0.50, 0.24, 1.0),
+                            text_color=(1, 1, 1, 1),
+                        )
+                        play_btn.bind(on_press=lambda ins, p=media_path: self.play_video_file(p))
                     row.add_widget(play_btn)
 
                     # DELETE BUTTON with icon
@@ -4735,6 +5276,14 @@ if KIVY_AVAILABLE:
             bar.add_widget(ctrl_row)
             return bar
 
+        def play_video_file(self, file_path: Path, title: Optional[str] = None):
+            """Play downloaded local video file with native hardware acceleration and live notification support."""
+            if not file_path or not file_path.exists():
+                return
+            clean_title = safe_display_text(title or file_path.stem)
+            self.update_status(f"[color=#00E676]Playing Video:[/color] {clean_title}", 0)
+            play_video_file(file_path, title=clean_title)
+
         def play_audio_track(self, file_path: Path):
             """Load and play local audio file in the built-in mini music player."""
             if not file_path or not file_path.exists():
@@ -4796,21 +5345,27 @@ if KIVY_AVAILABLE:
 
             self.current_sound.play()
 
+            # Show Media Notification in Android notification bar
+            self.notification_manager.show_media_playback(file_path.stem, is_playing=True, media_type="Song")
+
             if not self.player_clock_event:
                 self.player_clock_event = Clock.schedule_interval(self._update_player_progress, 0.4)
 
         def toggle_audio_playback(self):
-            """Toggle play / pause on current active audio track."""
+            """Toggle play / pause on current active audio track and sync notification state."""
             if not self.current_sound:
                 return
+            track_title = safe_display_text(self.current_track_path.stem if self.current_track_path else "Song Track")
             if self.current_sound.state == "play":
                 self.current_sound.stop()
                 self.is_audio_playing = False
                 self.mini_player_play_btn.text = "▶"
+                self.notification_manager.show_media_playback(track_title, is_playing=False, media_type="Song")
             else:
                 self.current_sound.play()
                 self.is_audio_playing = True
                 self.mini_player_play_btn.text = "⏸"
+                self.notification_manager.show_media_playback(track_title, is_playing=True, media_type="Song")
 
         def play_next_audio(self):
             """Play next audio track in library queue."""
@@ -4827,7 +5382,7 @@ if KIVY_AVAILABLE:
             self.play_audio_track(self.audio_playlist[self.audio_index])
 
         def close_mini_player(self):
-            """Stop playback, unload audio engine, and collapse mini player bar."""
+            """Stop playback, unload audio engine, collapse mini player bar, and dismiss notification."""
             if self.current_sound:
                 try:
                     self.current_sound.stop()
@@ -4844,10 +5399,26 @@ if KIVY_AVAILABLE:
             self.mini_player_bar.height = 0
             self.mini_player_bar.opacity = 0
             self.mini_player_bar.disabled = True
+            self.notification_manager.hide_media_playback()
 
         def _update_player_progress(self, dt):
             """Update mini player progress bar and elapsed/duration label."""
             if not self.current_sound:
+                return
+            if self.current_sound.state == "play":
+                pos = self.current_sound.get_pos()
+                length = self.current_sound.length or 0
+                if length > 0:
+                    pct = (pos / length) * 100
+                    self.mini_player_progress.value = min(100, max(0, pct))
+                    self.mini_player_time.text = f"{format_duration(pos)} / {format_duration(length)} • Playing"
+                else:
+                    self.mini_player_time.text = f"{format_duration(pos)} • Playing"
+            elif self.current_sound.state == "stop" and self.is_audio_playing:
+                pos = self.current_sound.get_pos()
+                length = self.current_sound.length or 0
+                if length > 0 and pos >= (length - 1.0):
+                    self.play_next_audio()
                 return
             if self.current_sound.state == "play":
                 pos = self.current_sound.get_pos()
