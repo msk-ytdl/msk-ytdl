@@ -445,6 +445,118 @@ def test_sleep_timer_controls():
         assert app.sleep_timer_end_time == 0.0
 
 
+def test_parse_duration_to_seconds():
+    from mobile_app import parse_duration_to_seconds
+    assert parse_duration_to_seconds("3:06") == 186.0
+    assert parse_duration_to_seconds("1:02:15") == 3735.0
+    assert parse_duration_to_seconds(120) == 120.0
+    assert parse_duration_to_seconds("45") == 45.0
+    assert parse_duration_to_seconds(None) == 0.0
+    assert parse_duration_to_seconds("") == 0.0
+
+
+def test_calculate_format_sizes():
+    from mobile_app import calculate_format_sizes
+    mock_formats = [
+        {"format_id": "140", "vcodec": "none", "acodec": "mp4a.40.2", "abr": 128, "filesize": 4000000},
+        {"format_id": "137", "vcodec": "avc1.640028", "acodec": "none", "height": 1080, "filesize": 50000000},
+        {"format_id": "136", "vcodec": "avc1.4d401f", "acodec": "none", "height": 720, "filesize": 25000000},
+        {"format_id": "18", "vcodec": "avc1.42001E", "acodec": "mp4a.40.2", "height": 360, "filesize": 12000000},
+    ]
+    sizes = calculate_format_sizes(mock_formats, duration=200.0)
+    assert "1080p" in sizes and "MB" in sizes["1080p"]
+    assert "720p" in sizes and "MB" in sizes["720p"]
+    assert "360p" in sizes and "MB" in sizes["360p"]
+    assert "m4a_aac" in sizes and "MB" in sizes["m4a_aac"]
+    assert "mp3_320" in sizes and "MB" in sizes["mp3_320"]
+
+
+def test_get_available_download_formats_omits_unsupported_4k_and_2k():
+    from mobile_app import get_available_download_formats
+    # Video only goes up to 1080p
+    mock_formats_1080p = [
+        {"format_id": "140", "vcodec": "none", "acodec": "mp4a.40.2", "abr": 128, "filesize": 3500000},
+        {"format_id": "137", "vcodec": "avc1.640028", "acodec": "none", "height": 1080, "filesize": 45000000},
+        {"format_id": "136", "vcodec": "avc1.4d401f", "acodec": "none", "height": 720, "filesize": 22000000},
+        {"format_id": "18", "vcodec": "avc1.42001E", "acodec": "mp4a.40.2", "height": 360, "filesize": 11000000},
+    ]
+
+    v_opts, a_opts = get_available_download_formats(mock_formats_1080p, duration=186.0)
+    v_keys = [opt[0] for opt in v_opts]
+
+    # Critical requirement: 4K and 2K MUST NOT be shown because video does not have them!
+    assert "Video (4K Ultra HD - 2160p)" not in v_keys
+    assert "Video (2K Quad HD - 1440p)" not in v_keys
+
+    # 1080p, 720p, 360p MUST be shown with sizes
+    assert "Video (1080p Full HD MP4)" in v_keys
+    assert "Video (720p HD MP4)" in v_keys
+    assert "Video (360p Fast MP4)" in v_keys
+
+    for opt in v_opts:
+        # Check size_text is present (5th element in tuple)
+        size_str = opt[4]
+        assert "MB" in size_str or "KB" in size_str or "GB" in size_str
+
+
+def test_get_available_download_formats_includes_4k_when_supported():
+    from mobile_app import get_available_download_formats
+    # Video supports 4K (2160p)
+    mock_formats_4k = [
+        {"format_id": "140", "vcodec": "none", "acodec": "mp4a.40.2", "abr": 128, "filesize": 4000000},
+        {"format_id": "313", "vcodec": "vp9", "acodec": "none", "height": 2160, "filesize": 450000000},
+        {"format_id": "271", "vcodec": "vp9", "acodec": "none", "height": 1440, "filesize": 200000000},
+        {"format_id": "137", "vcodec": "avc1.640028", "acodec": "none", "height": 1080, "filesize": 60000000},
+        {"format_id": "136", "vcodec": "avc1.4d401f", "acodec": "none", "height": 720, "filesize": 30000000},
+    ]
+
+    v_opts, a_opts = get_available_download_formats(mock_formats_4k, duration=180.0)
+    v_keys = [opt[0] for opt in v_opts]
+
+    # When 4K is present in streams, 4K and 2K are included!
+    assert "Video (4K Ultra HD - 2160p)" in v_keys
+    assert "Video (2K Quad HD - 1440p)" in v_keys
+    assert "Video (1080p Full HD MP4)" in v_keys
+
+
+def test_get_available_download_formats_720p_only():
+    from mobile_app import get_available_download_formats
+    # Older video that only supports up to 720p
+    mock_formats_720p = [
+        {"format_id": "140", "vcodec": "none", "acodec": "mp4a.40.2", "abr": 128, "filesize": 2000000},
+        {"format_id": "22", "vcodec": "avc1.64001F", "acodec": "mp4a.40.2", "height": 720, "filesize": 18000000},
+        {"format_id": "18", "vcodec": "avc1.42001E", "acodec": "mp4a.40.2", "height": 360, "filesize": 8000000},
+    ]
+
+    v_opts, a_opts = get_available_download_formats(mock_formats_720p, duration=120.0)
+    v_keys = [opt[0] for opt in v_opts]
+
+    # 4K, 2K, and 1080p must all be omitted
+    assert "Video (4K Ultra HD - 2160p)" not in v_keys
+    assert "Video (2K Quad HD - 1440p)" not in v_keys
+    assert "Video (1080p Full HD MP4)" not in v_keys
+
+    # 720p and 360p must be present
+    assert "Video (720p HD MP4)" in v_keys
+    assert "Video (360p Fast MP4)" in v_keys
+
+
+def test_format_option_card_size_text_display():
+    from mobile_app import FormatOptionCard
+    card = FormatOptionCard(
+        key="Video (1080p Full HD MP4)",
+        title="1080p Full HD MP4",
+        subtitle="Highest visual clarity (1920x1080)",
+        badge_text="1080p HD",
+        size_text="45.2 MB",
+        is_selected=True,
+    )
+    assert "45.2 MB" in card.sub_lbl.text
+    assert card.size_lbl.text == "[b]45.2 MB[/b]"
+    assert card.height > 50
+
+
+
 
 
 

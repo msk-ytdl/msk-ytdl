@@ -1046,6 +1046,14 @@ def get_ydl_format_selector(selected_format: str, has_ffmpeg: bool = False) -> s
             "bestvideo[height<=720]+bestaudio/"
             "22/best[height<=720]/best"
         )
+    elif "480p" in selected_format:
+        # 480p SD MP4
+        return (
+            "bestvideo[height<=480][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=480]+bestaudio/"
+            "best[height<=480]/best"
+        )
     elif "360p" in selected_format:
         # 360p Fast MP4
         return (
@@ -1064,6 +1072,238 @@ def get_ydl_format_selector(selected_format: str, has_ffmpeg: bool = False) -> s
             "bestvideo[height<=720]+bestaudio/"
             "best"
         )
+
+
+def parse_duration_to_seconds(dur_val: Any) -> float:
+    """Safely convert duration representation (int, float, or string like '3:06' or '1:24:10') to seconds."""
+    if dur_val is None:
+        return 0.0
+    if isinstance(dur_val, (int, float)):
+        return float(dur_val)
+    if isinstance(dur_val, str):
+        cleaned = dur_val.strip()
+        parts = cleaned.split(":")
+        try:
+            if len(parts) == 3:
+                return float(int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2]))
+            elif len(parts) == 2:
+                return float(int(parts[0]) * 60 + int(parts[1]))
+            elif len(parts) == 1 and parts[0].isdigit():
+                return float(parts[0])
+        except Exception:
+            pass
+    return 0.0
+
+
+def calculate_format_sizes(formats: Optional[List[Dict[str, Any]]], duration: float = 0.0) -> Dict[str, str]:
+    """
+    Compute exact or estimated file size string for each video quality tier and audio stream.
+    Returns mapping of quality tags ('2160p', '1440p', '1080p', '720p', '480p', '360p', 'mp3_320', 'm4a_aac')
+    to human-readable size strings (e.g. '42.5 MB').
+    """
+    result: Dict[str, str] = {}
+    formats = formats or []
+
+    # 1. Resolve Best Audio Stream Size
+    audio_formats = [
+        f for f in formats
+        if isinstance(f, dict) and f.get("acodec") != "none" and (f.get("vcodec") == "none" or not f.get("vcodec"))
+    ]
+    best_audio_bytes = 0
+    m4a_140 = next((f for f in audio_formats if str(f.get("format_id")) == "140"), None)
+    selected_aud = m4a_140 or (max(audio_formats, key=lambda f: f.get("abr") or 0) if audio_formats else None)
+
+    if selected_aud:
+        best_audio_bytes = selected_aud.get("filesize") or selected_aud.get("filesize_approx") or 0
+        if not best_audio_bytes and duration > 0:
+            abr = selected_aud.get("abr") or 128
+            best_audio_bytes = int((abr * 1000 / 8) * duration)
+    elif duration > 0:
+        best_audio_bytes = int((128 * 1000 / 8) * duration)
+
+    # 2. Audio Sizes: M4A and MP3 320k
+    if best_audio_bytes > 0:
+        result["m4a_aac"] = format_bytes(best_audio_bytes)
+        if duration > 0:
+            mp3_bytes = int((320 * 1000 / 8) * duration)
+        else:
+            mp3_bytes = int(best_audio_bytes * 2.5)
+        result["mp3_320"] = format_bytes(mp3_bytes)
+    elif duration > 0:
+        m4a_bytes = int((128 * 1000 / 8) * duration)
+        mp3_bytes = int((320 * 1000 / 8) * duration)
+        result["m4a_aac"] = format_bytes(m4a_bytes)
+        result["mp3_320"] = format_bytes(mp3_bytes)
+    else:
+        result["m4a_aac"] = ""
+        result["mp3_320"] = ""
+
+    # 3. Video Tier Default Bitrates (kbps) when explicit size is omitted in DASH stream
+    default_v_bitrates = {
+        2160: 22000,  # 4K UHD ~22 Mbps
+        1440: 10000,  # 2K QHD ~10 Mbps
+        1080: 4200,   # 1080p FHD ~4.2 Mbps
+        720: 2200,    # 720p HD ~2.2 Mbps
+        480: 1200,    # 480p SD ~1.2 Mbps
+        360: 650,     # 360p Fast ~650 kbps
+    }
+
+    tier_keys = {
+        2160: "2160p",
+        1440: "1440p",
+        1080: "1080p",
+        720: "720p",
+        480: "480p",
+        360: "360p",
+    }
+
+    video_formats = [
+        f for f in formats
+        if isinstance(f, dict) and f.get("vcodec") != "none" and f.get("height")
+    ]
+
+    for height_threshold, tag in tier_keys.items():
+        matching = [
+            f for f in video_formats
+            if f.get("height") and (
+                (height_threshold == 2160 and f.get("height") >= 2000) or
+                (height_threshold == 1440 and 1300 <= f.get("height") < 2000) or
+                (height_threshold == 1080 and 950 <= f.get("height") < 1300) or
+                (height_threshold == 720 and 650 <= f.get("height") < 950) or
+                (height_threshold == 480 and 420 <= f.get("height") < 650) or
+                (height_threshold == 360 and f.get("height") <= 420)
+            )
+        ]
+
+        if matching:
+            best_match = next((f for f in matching if f.get("filesize") or f.get("filesize_approx")), matching[0])
+            v_size = best_match.get("filesize") or best_match.get("filesize_approx") or 0
+            if not v_size and duration > 0:
+                tbr = best_match.get("tbr") or best_match.get("vbr") or default_v_bitrates.get(height_threshold, 1500)
+                v_size = int((tbr * 1000 / 8) * duration)
+            elif not v_size and default_v_bitrates.get(height_threshold) and duration > 0:
+                v_size = int((default_v_bitrates[height_threshold] * 1000 / 8) * duration)
+
+            if best_match.get("acodec") == "none" or not best_match.get("acodec"):
+                total_bytes = v_size + best_audio_bytes if v_size > 0 else 0
+            else:
+                total_bytes = v_size
+
+            if total_bytes > 0:
+                result[tag] = format_bytes(total_bytes)
+            else:
+                result[tag] = ""
+        else:
+            if duration > 0 and height_threshold in default_v_bitrates:
+                est_bytes = int(((default_v_bitrates[height_threshold] + 128) * 1000 / 8) * duration)
+                result[tag] = f"~{format_bytes(est_bytes)}"
+            else:
+                result[tag] = ""
+
+    return result
+
+
+def get_available_download_formats(
+    formats: Optional[List[Dict[str, Any]]],
+    duration: float = 0.0
+) -> Tuple[List[Tuple[str, str, str, str, str]], List[Tuple[str, str, str, str, str]]]:
+    """
+    Return ([video_options], [audio_options]) strictly filtered ONLY to formats supported by the media.
+    Each item tuple is (key, display_title, subtitle, badge_text, size_str).
+    """
+    formats = formats or []
+    sizes = calculate_format_sizes(formats, duration)
+
+    video_formats = [
+        f for f in formats
+        if isinstance(f, dict) and f.get("vcodec") != "none" and f.get("height")
+    ]
+    available_heights = [f.get("height") for f in video_formats if f.get("height")]
+
+    if formats and available_heights:
+        has_4k = any(h >= 2000 for h in available_heights)
+        has_2k = any(1300 <= h < 2000 for h in available_heights)
+        has_1080 = any(950 <= h < 1300 for h in available_heights)
+        has_720 = any(650 <= h < 950 for h in available_heights)
+        has_480 = any(420 <= h < 650 for h in available_heights)
+        has_360 = any(h < 650 for h in available_heights)
+    else:
+        # Fallback when metadata has not loaded yet: standard 1080p, 720p, 360p
+        has_4k = False
+        has_2k = False
+        has_1080 = True
+        has_720 = True
+        has_480 = False
+        has_360 = True
+
+    video_options: List[Tuple[str, str, str, str, str]] = []
+    if has_4k:
+        video_options.append((
+            "Video (4K Ultra HD - 2160p)",
+            "4K Ultra HD MP4",
+            "Extreme 4K clarity (3840x2160)",
+            "4K UHD",
+            sizes.get("2160p", "")
+        ))
+    if has_2k:
+        video_options.append((
+            "Video (2K Quad HD - 1440p)",
+            "2K Quad HD MP4",
+            "Crisp 2K resolution (2560x1440)",
+            "2K QHD",
+            sizes.get("1440p", "")
+        ))
+    if has_1080:
+        video_options.append((
+            "Video (1080p Full HD MP4)",
+            "1080p Full HD MP4",
+            "Highest visual clarity (1920x1080)",
+            "1080p HD",
+            sizes.get("1080p", "")
+        ))
+    if has_720:
+        video_options.append((
+            "Video (720p HD MP4)",
+            "720p HD MP4",
+            "High Definition MP4 (1280x720)",
+            "720p HD",
+            sizes.get("720p", "")
+        ))
+    if has_480 and not has_720:
+        video_options.append((
+            "Video (480p SD MP4)",
+            "480p Standard MP4",
+            "Standard quality (854x480)",
+            "480p SD",
+            sizes.get("480p", "")
+        ))
+    if has_360 or not video_options:
+        video_options.append((
+            "Video (360p Fast MP4)",
+            "360p Fast MP4",
+            "Lightweight file, data saver mode",
+            "360p",
+            sizes.get("360p", "")
+        ))
+
+    audio_options: List[Tuple[str, str, str, str, str]] = [
+        (
+            "Audio Only (HQ MP3 Music + Album Art)",
+            "HQ MP3 (320kbps + Album Art)",
+            "Studio quality music with embedded ID3 tags & cover",
+            "MP3 320k",
+            sizes.get("mp3_320", "")
+        ),
+        (
+            "Audio Only (M4A AAC Fast)",
+            "M4A AAC Fast Audio",
+            "Fast AAC audio direct stream",
+            "M4A AAC",
+            sizes.get("m4a_aac", "")
+        ),
+    ]
+
+    return video_options, audio_options
 
 
 class AndroidNativeAudioPlayer:
@@ -2348,13 +2588,14 @@ if KIVY_AVAILABLE:
 
 
     class FormatOptionCard(ButtonBehavior, BoxLayout):
-        """Selectable format/quality row inside the Download Options Modal."""
+        """Selectable format/quality row inside the Download Options Modal with dynamic size display."""
         def __init__(
             self,
             key: str,
             title: str,
             subtitle: str,
             badge_text: str = "",
+            size_text: str = "",
             is_selected: bool = False,
             on_select_cb=None,
             **kwargs,
@@ -2362,7 +2603,7 @@ if KIVY_AVAILABLE:
             super().__init__(**kwargs)
             self.orientation = "horizontal"
             self.size_hint_y = None
-            self.height = dp(52)
+            self.height = dp(56)
             self.spacing = dp(8)
             self.padding = [dp(10), dp(6)]
             self.key = key
@@ -2404,8 +2645,10 @@ if KIVY_AVAILABLE:
             self.title_lbl.bind(size=self.title_lbl.setter("text_size"))
             info_col.add_widget(self.title_lbl)
 
+            sub_display = f"{subtitle} • [b][color=#81C784]{size_text}[/color][/b]" if size_text else subtitle
             self.sub_lbl = Label(
-                text=subtitle,
+                text=sub_display,
+                markup=True,
                 font_size="10sp",
                 color=(0.65, 0.70, 0.82, 1.0),
                 halign="left",
@@ -2417,17 +2660,37 @@ if KIVY_AVAILABLE:
             info_col.add_widget(self.sub_lbl)
             self.add_widget(info_col)
 
-            # Optional badge
+            # Right Column: Size Label + Badge Card
+            right_col = BoxLayout(
+                orientation="vertical",
+                spacing=dp(2),
+                size_hint=(None, None),
+                size=(dp(76), dp(44)),
+                pos_hint={"center_y": 0.5},
+            )
+
+            self.size_lbl = Label(
+                text=f"[b]{size_text}[/b]" if size_text else "",
+                markup=True,
+                font_size="11sp",
+                color=(1.0, 0.82, 0.20, 1.0) if is_selected else (0.45, 0.85, 0.95, 1.0),
+                halign="center",
+                valign="middle",
+                size_hint_y=None,
+                height=dp(18),
+            )
+            self.size_lbl.bind(size=self.size_lbl.setter("text_size"))
+            right_col.add_widget(self.size_lbl)
+
             if badge_text:
-                is_gold = "1080p" in badge_text or "MP3" in badge_text or "PLAYLIST" in badge_text
+                is_gold = "1080p" in badge_text or "MP3" in badge_text or "PLAYLIST" in badge_text or "4K" in badge_text or "2K" in badge_text
                 badge_bg = (0.28, 0.20, 0.08, 1.0) if is_gold else (0.13, 0.18, 0.28, 1.0)
                 badge_fg = (1.0, 0.80, 0.20, 1.0) if is_gold else (0.40, 0.82, 1.0, 1.0)
                 badge_card = StyledCard(
                     size_hint=(None, None),
-                    size=(dp(68), dp(24)),
+                    size=(dp(74), dp(22)),
                     bg_color=badge_bg,
                     radius=6,
-                    pos_hint={"center_y": 0.5},
                 )
                 badge_lbl = Label(
                     text=badge_text,
@@ -2439,8 +2702,9 @@ if KIVY_AVAILABLE:
                 )
                 badge_lbl.bind(size=badge_lbl.setter("text_size"))
                 badge_card.add_widget(badge_lbl)
-                self.add_widget(badge_card)
+                right_col.add_widget(badge_card)
 
+            self.add_widget(right_col)
             self.bind(on_press=self._on_pressed)
 
         def _update_geom(self, *args):
@@ -2453,10 +2717,14 @@ if KIVY_AVAILABLE:
                 self._col_instr.rgba = (0.22, 0.28, 0.44, 1.0)
                 self.indicator_lbl.text = "[b][color=#FFB300]●[/color][/b]"
                 self.title_lbl.color = (1.0, 0.85, 0.20, 1.0)
+                if hasattr(self, "size_lbl"):
+                    self.size_lbl.color = (1.0, 0.85, 0.20, 1.0)
             else:
                 self._col_instr.rgba = (0.11, 0.13, 0.20, 1.0)
                 self.indicator_lbl.text = "[color=#607D8B]○[/color]"
                 self.title_lbl.color = (0.95, 0.95, 1.0, 1.0)
+                if hasattr(self, "size_lbl"):
+                    self.size_lbl.color = (0.45, 0.85, 0.95, 1.0)
 
         def _on_pressed(self, *args):
             if self.on_select_cb:
@@ -5068,9 +5336,18 @@ if KIVY_AVAILABLE:
             opts_box = BoxLayout(orientation="vertical", spacing=dp(6), size_hint_y=None)
             opts_box.bind(minimum_height=opts_box.setter("height"))
 
+            formats = media_item.get("formats") or []
+            dur_sec = media_item.get("duration_seconds") or parse_duration_to_seconds(media_item.get("duration"))
+            video_options, audio_options = get_available_download_formats(formats, dur_sec)
+
             initial_fmt = self.quality_spinner.text if hasattr(self, "quality_spinner") and self.quality_spinner.text else "Video (1080p Full HD MP4)"
             if initial_fmt == "Video (Max Quality - 1080p / 720p HD)":
                 initial_fmt = "Video (1080p Full HD MP4)"
+
+            available_keys = [opt[0] for opt in video_options] + [opt[0] for opt in audio_options]
+            if initial_fmt not in available_keys and video_options:
+                initial_fmt = video_options[0][0]
+
             selected_state = {"format": initial_fmt}
             option_cards: Dict[str, Any] = {}
 
@@ -5086,6 +5363,9 @@ if KIVY_AVAILABLE:
                 entries = [e for e in raw_entries if e]
                 total_entries = len(entries) if entries else count
 
+                total_pl_dur = sum(e.get("duration") or 0 for e in entries) if entries else (dur_sec * count if dur_sec else 0)
+                pl_sizes = calculate_format_sizes(None, total_pl_dur)
+
                 # 1. Format Selection Header
                 fmt_sec_lbl = Label(
                     text="[b][color=#FFB300]1. CHOOSE PLAYLIST FORMAT[/color][/b]",
@@ -5099,17 +5379,15 @@ if KIVY_AVAILABLE:
                 opts_box.add_widget(fmt_sec_lbl)
 
                 plist_options = [
-                    ("Video (4K Ultra HD - 2160p)", "4K Ultra HD MP4", "Extreme 4K clarity (3840x2160)", "4K UHD"),
-                    ("Video (2K Quad HD - 1440p)", "2K Quad HD MP4", "Crisp 2K resolution (2560x1440)", "2K QHD"),
-                    ("Video (1080p Full HD MP4)", "1080p Full HD MP4", "High Definition Video (1920x1080)", "1080p HD"),
-                    ("Video (720p HD MP4)", "720p HD MP4", "Standard High Definition (1280x720)", "720p HD"),
-                    ("Video (360p Fast MP4)", "360p Fast MP4", "Compact file size, data saver", "360p"),
-                    ("Audio Only (HQ MP3 Music + Album Art)", "HQ MP3 (320kbps + Album Art)", "Studio quality music with cover & ID3 tags", "MP3 320k"),
-                    ("Audio Only (M4A AAC Fast)", "M4A AAC Fast Audio", "Fast AAC audio stream", "M4A AAC"),
+                    ("Video (1080p Full HD MP4)", "1080p Full HD MP4", "High Definition Video (1920x1080)", "1080p HD", pl_sizes.get("1080p", "")),
+                    ("Video (720p HD MP4)", "720p HD MP4", "Standard High Definition (1280x720)", "720p HD", pl_sizes.get("720p", "")),
+                    ("Video (360p Fast MP4)", "360p Fast MP4", "Compact file size, data saver", "360p", pl_sizes.get("360p", "")),
+                    ("Audio Only (HQ MP3 Music + Album Art)", "HQ MP3 (320kbps + Album Art)", "Studio quality music with cover & ID3 tags", "MP3 320k", pl_sizes.get("mp3_320", "")),
+                    ("Audio Only (M4A AAC Fast)", "M4A AAC Fast Audio", "Fast AAC audio stream", "M4A AAC", pl_sizes.get("m4a_aac", "")),
                 ]
-                for key, title, sub, badge in plist_options:
+                for key, title, sub, badge, sz in plist_options:
                     is_sel = (key == selected_state["format"])
-                    c = FormatOptionCard(key, title, sub, badge, is_selected=is_sel, on_select_cb=on_option_picked)
+                    c = FormatOptionCard(key, title, sub, badge, size_text=sz, is_selected=is_sel, on_select_cb=on_option_picked)
                     option_cards[key] = c
                     opts_box.add_widget(c)
 
@@ -5224,51 +5502,73 @@ if KIVY_AVAILABLE:
                     empty_hint.bind(size=empty_hint.setter("text_size"))
                     opts_box.add_widget(empty_hint)
             else:
-                # Video formats header
-                v_sec_lbl = Label(
-                    text="[b][color=#38BDF8]VIDEO FORMATS (MP4)[/color][/b]",
-                    markup=True,
-                    font_size="11sp",
-                    size_hint_y=None,
-                    height=dp(20),
-                    halign="left",
-                )
-                v_sec_lbl.bind(size=v_sec_lbl.setter("text_size"))
-                opts_box.add_widget(v_sec_lbl)
+                def populate_single_options(v_opts, a_opts):
+                    opts_box.clear_widgets()
+                    option_cards.clear()
 
-                video_options = [
-                    ("Video (4K Ultra HD - 2160p)", "4K Ultra HD MP4", "Extreme 4K clarity (3840x2160)", "4K UHD"),
-                    ("Video (2K Quad HD - 1440p)", "2K Quad HD MP4", "Crisp 2K resolution (2560x1440)", "2K QHD"),
-                    ("Video (1080p Full HD MP4)", "1080p Full HD MP4", "Highest visual clarity (1920x1080)", "1080p HD"),
-                    ("Video (720p HD MP4)", "720p HD MP4", "High Definition MP4 (1280x720)", "720p HD"),
-                    ("Video (360p Fast MP4)", "360p Fast MP4", "Lightweight file, data saver mode", "360p"),
-                ]
-                for key, title, sub, badge in video_options:
-                    is_sel = (key == selected_state["format"])
-                    c = FormatOptionCard(key, title, sub, badge, is_selected=is_sel, on_select_cb=on_option_picked)
-                    option_cards[key] = c
-                    opts_box.add_widget(c)
+                    # Video formats header
+                    v_sec_lbl = Label(
+                        text="[b][color=#38BDF8]AVAILABLE VIDEO FORMATS (MP4)[/color][/b]",
+                        markup=True,
+                        font_size="11sp",
+                        size_hint_y=None,
+                        height=dp(20),
+                        halign="left",
+                    )
+                    v_sec_lbl.bind(size=v_sec_lbl.setter("text_size"))
+                    opts_box.add_widget(v_sec_lbl)
 
-                # Audio formats header
-                a_sec_lbl = Label(
-                    text="[b][color=#FFB300]AUDIO FORMATS (MP3 / M4A)[/color][/b]",
-                    markup=True,
-                    font_size="11sp",
-                    size_hint_y=None,
-                    height=dp(22),
-                    halign="left",
-                )
-                a_sec_lbl.bind(size=a_sec_lbl.setter("text_size"))
-                opts_box.add_widget(a_sec_lbl)
+                    for key, title, sub, badge, sz in v_opts:
+                        is_sel = (key == selected_state["format"])
+                        c = FormatOptionCard(key, title, sub, badge, size_text=sz, is_selected=is_sel, on_select_cb=on_option_picked)
+                        option_cards[key] = c
+                        opts_box.add_widget(c)
 
-                audio_options = [
-                    ("Audio Only (HQ MP3 Music + Album Art)", "HQ MP3 (320kbps + Album Art)", "Studio quality music with embedded ID3 tags & cover", "MP3 320k"),
-                    ("Audio Only (M4A AAC Fast)", "M4A AAC Fast Audio", "Fast AAC audio direct stream", "M4A AAC"),
-                ]
-                for key, title, sub, badge in audio_options:
-                    c = FormatOptionCard(key, title, sub, badge, is_selected=False, on_select_cb=on_option_picked)
-                    option_cards[key] = c
-                    opts_box.add_widget(c)
+                    # Audio formats header
+                    a_sec_lbl = Label(
+                        text="[b][color=#FFB300]AUDIO FORMATS (MP3 / M4A)[/color][/b]",
+                        markup=True,
+                        font_size="11sp",
+                        size_hint_y=None,
+                        height=dp(22),
+                        halign="left",
+                    )
+                    a_sec_lbl.bind(size=a_sec_lbl.setter("text_size"))
+                    opts_box.add_widget(a_sec_lbl)
+
+                    for key, title, sub, badge, sz in a_opts:
+                        is_sel = (key == selected_state["format"])
+                        c = FormatOptionCard(key, title, sub, badge, size_text=sz, is_selected=is_sel, on_select_cb=on_option_picked)
+                        option_cards[key] = c
+                        opts_box.add_widget(c)
+
+                populate_single_options(video_options, audio_options)
+
+                # If formats were not pre-loaded (e.g. user clicked GET on search card), extract formats asynchronously
+                if not formats and media_item.get("url"):
+                    def async_fetch_formats():
+                        try:
+                            import yt_dlp
+                            with yt_dlp.YoutubeDL({"quiet": True, "extract_flat": "in_playlist", "socket_timeout": 12}) as ydl:
+                                extracted = ydl.extract_info(media_item["url"], download=False)
+                                if extracted and extracted.get("formats"):
+                                    extracted_formats = extracted["formats"]
+                                    extracted_dur = extracted.get("duration") or dur_sec
+                                    media_item["formats"] = extracted_formats
+                                    media_item["duration_seconds"] = extracted_dur
+                                    new_v, new_a = get_available_download_formats(extracted_formats, extracted_dur)
+
+                                    def on_live_resolve(dt=None):
+                                        cur_keys = [o[0] for o in new_v] + [o[0] for o in new_a]
+                                        if selected_state["format"] not in cur_keys and new_v:
+                                            selected_state["format"] = new_v[0][0]
+                                        populate_single_options(new_v, new_a)
+
+                                    Clock.schedule_once(on_live_resolve)
+                        except Exception as e:
+                            print(f"[Modal] Async formats resolution notice: {e}")
+
+                    threading.Thread(target=async_fetch_formats, daemon=True).start()
 
             scroll.add_widget(opts_box)
             content.add_widget(scroll)
@@ -5447,10 +5747,12 @@ if KIVY_AVAILABLE:
                             "channel": uploader,
                             "uploader": uploader,
                             "duration": dur_str,
+                            "duration_seconds": info.get("duration") or 0.0,
                             "is_playlist": is_playlist,
                             "count": count,
                             "entries": entries,
                             "platform": plat,
+                            "formats": info.get("formats") or [],
                         }
 
                         Clock.schedule_once(
@@ -5468,10 +5770,12 @@ if KIVY_AVAILABLE:
                         "channel": plat,
                         "uploader": plat,
                         "duration": "Media",
+                        "duration_seconds": 0.0,
                         "is_playlist": "playlist" in url.lower() or "list=" in url.lower(),
                         "count": 1,
                         "entries": [],
                         "platform": plat,
+                        "formats": [],
                     }
                     Clock.schedule_once(
                         lambda dt: self.update_preview_ui(f"{plat} Media", "Ready to download", "", "DOWNLOAD NOW")
