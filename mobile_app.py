@@ -631,18 +631,66 @@ def scan_media_file(filepath: Path):
         print(f"[Android] MediaScanner notice: {e}")
 
 
+def find_ffmpeg_binary() -> Optional[str]:
+    """
+    Locate ffmpeg binary across system PATH, Android app internal directories,
+    or python-for-android buildozer bundles.
+    """
+    # 1. System PATH
+    w = shutil.which("ffmpeg")
+    if w and os.path.isfile(w):
+        return w
+
+    # 2. Android app private directories / lib paths
+    candidates = [
+        Path(os.environ.get("ANDROID_PRIVATE", "")) / "bin" / "ffmpeg",
+        Path("/data/data/org.msk.ytdl/files/app/bin/ffmpeg"),
+        Path("/data/data/org.msk.ytdl/bin/ffmpeg"),
+        Path(__file__).resolve().parent / "bin" / "ffmpeg",
+        Path(__file__).resolve().parent / "ffmpeg",
+    ]
+    for c in candidates:
+        try:
+            if c.exists() and (os.access(str(c), os.X_OK) or os.name == "nt"):
+                return str(c)
+        except Exception:
+            pass
+    return None
+
+
 def mux_video_audio_android(video_path: Path, audio_path: Path, output_path: Path) -> bool:
     """
-    Natively merge separate video (H.264/MP4) and audio (AAC/M4A) streams into a single MP4
-    container using Android's native android.media.MediaMuxer & MediaExtractor APIs via PyJnius.
+    Natively merge separate video (H.264/MP4 or VP9/WebM) and audio (AAC/M4A or Opus) streams
+    into a single playable container using system/app FFmpeg if available, or Android's
+    native android.media.MediaMuxer & MediaExtractor APIs via PyJnius.
     Ensures chronological presentation timestamp (PTS) interleaving across tracks as strictly
-    mandated by Android MediaMuxer. Falls back to system FFmpeg if available on non-Android platforms.
+    mandated by Android MediaMuxer.
     """
     if not video_path.exists() or not audio_path.exists():
         print(f"[MediaMuxer] Input file missing: v={video_path.exists()}, a={audio_path.exists()}")
         return False
 
-    # Attempt native Android MediaMuxer via PyJnius
+    # 1. Check for FFmpeg binary first (internal APK or system)
+    ffmpeg_bin = find_ffmpeg_binary()
+    if ffmpeg_bin:
+        try:
+            import subprocess
+            cmd = [
+                ffmpeg_bin, "-y",
+                "-i", str(video_path.resolve()),
+                "-i", str(audio_path.resolve()),
+                "-c", "copy",
+                "-shortest",
+                str(output_path.resolve())
+            ]
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            if res.returncode == 0 and output_path.exists() and output_path.stat().st_size > 1024:
+                print(f"[MediaMuxer] FFmpeg mux successful -> {output_path.name} ({output_path.stat().st_size} bytes)")
+                return True
+        except Exception as fe:
+            print(f"[MediaMuxer] FFmpeg mux notice: {fe}")
+
+    # 2. Native Android MediaMuxer via PyJnius (no external dependencies needed)
     if is_running_on_android():
         v_fis = None
         a_fis = None
@@ -660,17 +708,17 @@ def mux_video_audio_android(video_path: Path, audio_path: Path, output_path: Pat
             FileOutputStream = autoclass("java.io.FileOutputStream")
             File = autoclass("java.io.File")
 
-            # 1. Open video extractor via FileDescriptor (bypasses Scoped Storage / Stagefright path limits)
+            # Open video extractor via FileDescriptor (bypasses Scoped Storage / Stagefright limits)
             v_file = File(str(video_path.resolve()))
             v_fis = FileInputStream(v_file)
             v_extractor = MediaExtractor()
-            v_extractor.setDataSource(v_fis.getFD(), 0, v_file.length())
+            v_extractor.setDataSource(v_fis.getFD())
 
-            # 2. Open audio extractor via FileDescriptor
+            # Open audio extractor via FileDescriptor
             a_file = File(str(audio_path.resolve()))
             a_fis = FileInputStream(a_file)
             a_extractor = MediaExtractor()
-            a_extractor.setDataSource(a_fis.getFD(), 0, a_file.length())
+            a_extractor.setDataSource(a_fis.getFD())
 
             tmp_output = output_path
             if tmp_output.resolve() in (video_path.resolve(), audio_path.resolve()):
@@ -679,20 +727,25 @@ def mux_video_audio_android(video_path: Path, audio_path: Path, output_path: Pat
             out_file = File(str(tmp_output.resolve()))
             if out_file.exists():
                 out_file.delete()
-            fos = FileOutputStream(out_file)
 
+            # Output container format: 0 = MUXER_OUTPUT_MPEG_4, 1 = MUXER_OUTPUT_WEBM
+            output_format = 1 if tmp_output.suffix.lower() in (".webm", ".mkv") else 0
+
+            # MediaMuxer initialization: try FileOutputStream descriptor first, fallback to path
             try:
-                muxer = MediaMuxer(fos.getFD(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+                fos = FileOutputStream(out_file)
+                muxer = MediaMuxer(fos.getFD(), output_format)
             except Exception:
-                muxer = MediaMuxer(str(tmp_output.resolve()), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+                muxer = MediaMuxer(str(tmp_output.resolve()), output_format)
 
-            # 3. Select and add Video Track
+            # Select and add Video Track
             video_track_idx = -1
             for i in range(v_extractor.getTrackCount()):
                 format_obj = v_extractor.getTrackFormat(i)
                 mime = None
                 try:
-                    mime = format_obj.getString("mime")
+                    if format_obj.containsKey("mime"):
+                        mime = format_obj.getString("mime")
                 except Exception:
                     pass
                 if mime and mime.startswith("video/"):
@@ -700,13 +753,14 @@ def mux_video_audio_android(video_path: Path, audio_path: Path, output_path: Pat
                     video_track_idx = muxer.addTrack(format_obj)
                     break
 
-            # 4. Select and add Audio Track
+            # Select and add Audio Track
             audio_track_idx = -1
             for i in range(a_extractor.getTrackCount()):
                 format_obj = a_extractor.getTrackFormat(i)
                 mime = None
                 try:
-                    mime = format_obj.getString("mime")
+                    if format_obj.containsKey("mime"):
+                        mime = format_obj.getString("mime")
                 except Exception:
                     pass
                 if mime and mime.startswith("audio/"):
@@ -720,12 +774,12 @@ def mux_video_audio_android(video_path: Path, audio_path: Path, output_path: Pat
 
             muxer.start()
 
-            # 5. Allocate 4MB direct ByteBuffer for high-bitrate keyframes
-            buf_size = 4 * 1024 * 1024
+            # Allocate 8MB direct ByteBuffer for high-bitrate 1080p/2K/4K keyframes
+            buf_size = 8 * 1024 * 1024
             buf = ByteBuffer.allocateDirect(buf_size)
             buffer_info = MediaCodec_BufferInfo()
 
-            # 6. Interleaved sample writing across tracks by presentation timestamp (PTS)
+            # Interleaved sample writing across tracks by presentation timestamp (PTS)
             while True:
                 v_time = v_extractor.getSampleTime()
                 a_time = a_extractor.getSampleTime()
@@ -752,6 +806,19 @@ def mux_video_audio_android(video_path: Path, audio_path: Path, output_path: Pat
                 muxer.stop()
             except Exception as se:
                 print(f"[MediaMuxer] muxer.stop note: {se}")
+
+            try:
+                muxer.release()
+                muxer = None
+            except Exception:
+                pass
+
+            if fos:
+                try:
+                    fos.close()
+                    fos = None
+                except Exception:
+                    pass
 
             if tmp_output != output_path:
                 if output_path.exists():
@@ -796,26 +863,6 @@ def mux_video_audio_android(video_path: Path, audio_path: Path, output_path: Pat
                 except Exception:
                     pass
 
-    # Fallback: system FFmpeg if available
-    ffmpeg_bin = shutil.which("ffmpeg")
-    if ffmpeg_bin:
-        try:
-            import subprocess
-            cmd = [
-                ffmpeg_bin, "-y",
-                "-i", str(video_path.resolve()),
-                "-i", str(audio_path.resolve()),
-                "-c", "copy",
-                "-shortest",
-                str(output_path.resolve())
-            ]
-            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-            if res.returncode == 0 and output_path.exists():
-                print(f"[MediaMuxer] System FFmpeg mux successful -> {output_path.name}")
-                return True
-        except Exception as fe:
-            print(f"[MediaMuxer] FFmpeg mux notice: {fe}")
-
     return False
 
 
@@ -824,6 +871,7 @@ def get_ydl_format_selector(selected_format: str, has_ffmpeg: bool = False) -> s
     Generate the precise yt-dlp format selector string based on user's chosen quality/audio option.
     Ensures:
       - Audio selections NEVER fall back to video streams (/best is omitted).
+      - 4K (2160p) and 2K (1440p) requests highest resolution video + best audio stream.
       - 1080p / 720p prioritizes universal H.264 (avc1) + AAC (m4a) DASH streams for flawless muxing & playback.
       - 360p selects fast lightweight progressive (18) or 360p streams.
     """
@@ -837,18 +885,63 @@ def get_ydl_format_selector(selected_format: str, has_ffmpeg: bool = False) -> s
         return "140/bestaudio[ext=m4a]/bestaudio[acodec!=none]/bestaudio/ba"
 
     # Video options
-    if "1080p" in selected_format or "Max Quality" in selected_format:
+    if "4K" in selected_format or "2160p" in selected_format:
+        return (
+            "bestvideo[height<=2160][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=2160]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=2160]+bestaudio/"
+            "bestvideo[height<=1440]+bestaudio/"
+            "bestvideo[height<=1080]+bestaudio/"
+            "best[height<=2160]/best"
+        )
+    elif "2K" in selected_format or "1440p" in selected_format:
+        return (
+            "bestvideo[height<=1440][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=1440]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=1440]+bestaudio/"
+            "bestvideo[height<=1080]+bestaudio/"
+            "best[height<=1440]/best"
+        )
+    elif "1080p" in selected_format or "Max Quality" in selected_format:
         # 1080p Full HD (Max Quality)
-        return "bestvideo[height<=1080][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/bestvideo[height<=720][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/22/best[height<=1080]/18/best"
+        return (
+            "bestvideo[height<=1080][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=1080]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=1080]+bestaudio/"
+            "bestvideo[height<=720][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=720]+bestaudio/"
+            "22/best[height<=1080]/best"
+        )
     elif "720p" in selected_format:
         # 720p HD MP4
-        return "bestvideo[height<=720][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/22/best[height<=720]/18/best"
+        return (
+            "bestvideo[height<=720][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=720]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=720]+bestaudio/"
+            "22/best[height<=720]/best"
+        )
     elif "360p" in selected_format:
         # 360p Fast MP4
-        return "18/bestvideo[height<=360][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=360]+bestaudio/best[height<=360]/best"
+        return (
+            "18/"
+            "bestvideo[height<=360][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=360]+bestaudio/"
+            "best[height<=360]/best"
+        )
     else:
         # Fallback to high quality
-        return "bestvideo[height<=1080][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/bestvideo[height<=720][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/22/best[height<=1080]/18/best"
+        return (
+            "bestvideo[height<=1080][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=1080]+bestaudio/"
+            "bestvideo[height<=720]+bestaudio/"
+            "best"
+        )
 
 
 class AndroidNativeAudioPlayer:
@@ -2403,9 +2496,11 @@ if KIVY_AVAILABLE:
 
             # Default quality spinner for preferences
             self.quality_spinner = Spinner(
-                text="Video (Max Quality - 1080p / 720p HD)",
+                text="Video (1080p Full HD MP4)",
                 values=(
-                    "Video (Max Quality - 1080p / 720p HD)",
+                    "Video (4K Ultra HD - 2160p)",
+                    "Video (2K Quad HD - 1440p)",
+                    "Video (1080p Full HD MP4)",
                     "Video (720p HD MP4)",
                     "Video (360p Fast MP4)",
                     "Audio Only (HQ MP3 Music + Album Art)",
@@ -4658,7 +4753,10 @@ if KIVY_AVAILABLE:
             opts_box = BoxLayout(orientation="vertical", spacing=dp(6), size_hint_y=None)
             opts_box.bind(minimum_height=opts_box.setter("height"))
 
-            selected_state = {"format": "Video (Max Quality - 1080p / 720p HD)"}
+            initial_fmt = self.quality_spinner.text if hasattr(self, "quality_spinner") and self.quality_spinner.text else "Video (1080p Full HD MP4)"
+            if initial_fmt == "Video (Max Quality - 1080p / 720p HD)":
+                initial_fmt = "Video (1080p Full HD MP4)"
+            selected_state = {"format": initial_fmt}
             option_cards: Dict[str, Any] = {}
 
             def on_option_picked(key):
@@ -4686,7 +4784,9 @@ if KIVY_AVAILABLE:
                 opts_box.add_widget(fmt_sec_lbl)
 
                 plist_options = [
-                    ("Video (Max Quality - 1080p / 720p HD)", "1080p Full HD MP4", "High Definition Video (1920x1080)", "1080p HD"),
+                    ("Video (4K Ultra HD - 2160p)", "4K Ultra HD MP4", "Extreme 4K clarity (3840x2160)", "4K UHD"),
+                    ("Video (2K Quad HD - 1440p)", "2K Quad HD MP4", "Crisp 2K resolution (2560x1440)", "2K QHD"),
+                    ("Video (1080p Full HD MP4)", "1080p Full HD MP4", "High Definition Video (1920x1080)", "1080p HD"),
                     ("Video (720p HD MP4)", "720p HD MP4", "Standard High Definition (1280x720)", "720p HD"),
                     ("Video (360p Fast MP4)", "360p Fast MP4", "Compact file size, data saver", "360p"),
                     ("Audio Only (HQ MP3 Music + Album Art)", "HQ MP3 (320kbps + Album Art)", "Studio quality music with cover & ID3 tags", "MP3 320k"),
@@ -4822,12 +4922,14 @@ if KIVY_AVAILABLE:
                 opts_box.add_widget(v_sec_lbl)
 
                 video_options = [
-                    ("Video (Max Quality - 1080p / 720p HD)", "1080p Full HD MP4", "Highest visual clarity (1920x1080)", "1080p HD"),
+                    ("Video (4K Ultra HD - 2160p)", "4K Ultra HD MP4", "Extreme 4K clarity (3840x2160)", "4K UHD"),
+                    ("Video (2K Quad HD - 1440p)", "2K Quad HD MP4", "Crisp 2K resolution (2560x1440)", "2K QHD"),
+                    ("Video (1080p Full HD MP4)", "1080p Full HD MP4", "Highest visual clarity (1920x1080)", "1080p HD"),
                     ("Video (720p HD MP4)", "720p HD MP4", "High Definition MP4 (1280x720)", "720p HD"),
                     ("Video (360p Fast MP4)", "360p Fast MP4", "Lightweight file, data saver mode", "360p"),
                 ]
                 for key, title, sub, badge in video_options:
-                    is_sel = (key == "Video (Max Quality - 1080p / 720p HD)")
+                    is_sel = (key == selected_state["format"])
                     c = FormatOptionCard(key, title, sub, badge, is_selected=is_sel, on_select_cb=on_option_picked)
                     option_cards[key] = c
                     opts_box.add_widget(c)
@@ -5966,7 +6068,7 @@ if KIVY_AVAILABLE:
                 return
 
             url = normalized
-            selected_format = chosen_format or (self.quality_spinner.text if hasattr(self, "quality_spinner") else "Video (Max Quality - 1080p / 720p HD)")
+            selected_format = chosen_format or (self.quality_spinner.text if hasattr(self, "quality_spinner") else "Video (1080p Full HD MP4)")
             is_audio = "Audio" in selected_format
             plat = detect_media_platform(url)
 
@@ -6041,7 +6143,8 @@ if KIVY_AVAILABLE:
                                 lambda dt: self.update_status("Processing & saving media to storage...", 95)
                             )
 
-                    has_ffmpeg = bool(shutil.which("ffmpeg"))
+                    ffmpeg_path = find_ffmpeg_binary()
+                    has_ffmpeg = bool(ffmpeg_path)
                     safe_logger = AndroidYTDLLogger()
 
                     base_ydl_opts = {
@@ -6062,6 +6165,9 @@ if KIVY_AVAILABLE:
                         "buffersize": 1048576,
                         "http_chunk_size": 10485760,
                     }
+
+                    if ffmpeg_path:
+                        base_ydl_opts["ffmpeg_location"] = ffmpeg_path
 
                     # Format selector resolution
                     base_ydl_opts["format"] = get_ydl_format_selector(selected_format, has_ffmpeg=has_ffmpeg)
@@ -6231,7 +6337,7 @@ if KIVY_AVAILABLE:
 
                                     # Guaranteed fallback: fetch stream with synchronized audio
                                     fb_opts = dict(item_opts)
-                                    fb_opts["format"] = "22/best[height<=720][vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]/18/best"
+                                    fb_opts["format"] = "best[height<=1080][vcodec!=none][acodec!=none]/best[height<=720][vcodec!=none][acodec!=none]/22/best[vcodec!=none][acodec!=none]/18/best"
                                     fb_opts.pop("allow_unplayable_formats", None)
                                     fb_opts["extractor_args"] = {"youtube": {"player_client": ["android", "web"]}}
                                     try:
@@ -6258,7 +6364,7 @@ if KIVY_AVAILABLE:
                                 except Exception:
                                     pass
                                 fb_opts = dict(item_opts)
-                                fb_opts["format"] = "22/best[height<=720][vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]/18/best"
+                                fb_opts["format"] = "best[height<=1080][vcodec!=none][acodec!=none]/best[height<=720][vcodec!=none][acodec!=none]/22/best[vcodec!=none][acodec!=none]/18/best"
                                 fb_opts.pop("allow_unplayable_formats", None)
                                 fb_opts["extractor_args"] = {"youtube": {"player_client": ["android", "web"]}}
                                 try:

@@ -33,8 +33,8 @@ version = 1.0.1
 # (int) Numeric version code (Android versionCode)
 android.numeric_version = 1
 
-# (list) Application requirements (clean minimal runtime: removed unused requests, urllib3, rich, idna, charset-normalizer, sqlite3)
-requirements = python3,kivy,openssl,certifi,yt-dlp,yt-dlp-ejs,mutagen,pyjnius
+# (list) Application requirements (clean minimal runtime + ffmpeg recipe for hardware audio/video muxing)
+requirements = python3,kivy,openssl,certifi,yt-dlp,yt-dlp-ejs,mutagen,pyjnius,ffmpeg
 
 # (int) Strip debug symbols from binaries (.so files) using Android NDK llvm-strip (1 = standard, 2 = aggressive)
 android.strip = 2

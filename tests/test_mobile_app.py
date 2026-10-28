@@ -256,12 +256,27 @@ def test_get_ydl_format_selector_audio_never_falls_back_to_video():
 def test_get_ydl_format_selector_video_qualities():
     from mobile_app import get_ydl_format_selector
 
-    # 1080p Max Quality
-    sel_1080 = get_ydl_format_selector("Video (Max Quality - 1080p / 720p HD)", has_ffmpeg=False)
+    # 4K Ultra HD
+    sel_4k = get_ydl_format_selector("Video (4K Ultra HD - 2160p)", has_ffmpeg=False)
+    assert "2160" in sel_4k
+    assert "bestvideo[height<=2160]" in sel_4k
+
+    # 2K Quad HD
+    sel_2k = get_ydl_format_selector("Video (2K Quad HD - 1440p)", has_ffmpeg=False)
+    assert "1440" in sel_2k
+    assert "bestvideo[height<=1440]" in sel_2k
+
+    # 1080p Full HD
+    sel_1080 = get_ydl_format_selector("Video (1080p Full HD MP4)", has_ffmpeg=False)
     assert "1080" in sel_1080
     assert "avc1" in sel_1080
     assert "ext=mp4" in sel_1080
     assert "bestaudio[ext=m4a]" in sel_1080
+
+    # 1080p legacy / Max Quality
+    sel_1080_leg = get_ydl_format_selector("Video (Max Quality - 1080p / 720p HD)", has_ffmpeg=False)
+    assert "1080" in sel_1080_leg
+    assert "bestaudio[ext=m4a]" in sel_1080_leg
 
     # 720p HD
     sel_720 = get_ydl_format_selector("Video (720p HD MP4)", has_ffmpeg=False)
@@ -275,6 +290,13 @@ def test_get_ydl_format_selector_video_qualities():
     assert "18" in sel_360
 
 
+def test_find_ffmpeg_binary():
+    from mobile_app import find_ffmpeg_binary
+    # In any environment, should return string path or None without crashing
+    res = find_ffmpeg_binary()
+    assert res is None or isinstance(res, str)
+
+
 def test_mux_video_audio_android_safety(tmp_path):
     from mobile_app import mux_video_audio_android
     # Missing files safely returns False
@@ -285,8 +307,11 @@ def test_mux_video_audio_android_safety(tmp_path):
 def test_start_download_chosen_format_options():
     from mobile_app import get_ydl_format_selector
 
-    # Test all 5 options available in the Download Options Modal:
+    # Test all 7 options available in the Download Options Modal:
     options = {
+        "Video (4K Ultra HD - 2160p)": ("2160", False),
+        "Video (2K Quad HD - 1440p)": ("1440", False),
+        "Video (1080p Full HD MP4)": ("1080", False),
         "Video (Max Quality - 1080p / 720p HD)": ("1080", False),
         "Video (720p HD MP4)": ("720", False),
         "Video (360p Fast MP4)": ("360", False),
