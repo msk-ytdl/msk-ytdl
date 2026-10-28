@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Union
+from typing import Optional, Dict, Any, List, Union, Tuple
 
 # Safe standard stream wrapper to protect against Android Logcat / Kivy buffer crashes
 class SafeLogStream:
@@ -629,6 +629,109 @@ def scan_media_file(filepath: Path):
                     pass
     except Exception as e:
         print(f"[Android] MediaScanner notice: {e}")
+
+
+def get_vault_dir() -> Path:
+    """Return private hidden vault directory with .nomedia flag so public gallery excludes it."""
+    v_dir = get_android_download_dir() / ".vault"
+    v_dir.mkdir(parents=True, exist_ok=True)
+    nomedia = v_dir / ".nomedia"
+    if not nomedia.exists():
+        try:
+            nomedia.touch()
+        except Exception:
+            pass
+    return v_dir
+
+
+def get_vault_pin_hash() -> str:
+    """Retrieve stored SHA-256 hash of vault PIN (default '0000')."""
+    import hashlib
+    pin_file = get_vault_dir() / ".pin_hash"
+    if pin_file.exists():
+        try:
+            h = pin_file.read_text(encoding="utf-8").strip()
+            if h:
+                return h
+        except Exception:
+            pass
+    return hashlib.sha256("0000".encode("utf-8")).hexdigest()
+
+
+def set_vault_pin(pin_text: str):
+    """Set or change the 4-digit vault PIN securely."""
+    import hashlib
+    pin_file = get_vault_dir() / ".pin_hash"
+    h = hashlib.sha256(pin_text.strip().encode("utf-8")).hexdigest()
+    pin_file.write_text(h, encoding="utf-8")
+
+
+def check_vault_pin(entered_pin: str) -> bool:
+    """Verify entered PIN against stored hash."""
+    import hashlib
+    h = hashlib.sha256(entered_pin.strip().encode("utf-8")).hexdigest()
+    return h == get_vault_pin_hash()
+
+
+def set_audio_as_ringtone(filepath: Path) -> Tuple[bool, str]:
+    """
+    Save audio track into Android's system Ringtones directory (/sdcard/Ringtones)
+    and broadcast MediaScanner so it instantly appears in Phone Sound Settings / Ringtone picker.
+    Also attempts native RingtoneManager if permissions permit.
+    """
+    if not filepath or not filepath.exists():
+        return False, "File does not exist"
+
+    dest_dirs = [
+        Path("/storage/emulated/0/Ringtones"),
+        Path("/sdcard/Ringtones"),
+        get_android_download_dir() / "Ringtones",
+    ]
+    if is_running_on_android():
+        try:
+            from jnius import autoclass
+            Environment = autoclass("android.os.Environment")
+            ext_r = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_RINGTONES)
+            if ext_r:
+                dest_dirs.insert(0, Path(ext_r.getAbsolutePath()))
+        except Exception:
+            pass
+
+    target_file = None
+    for d in dest_dirs:
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            t = d / filepath.name
+            shutil.copy2(str(filepath), str(t))
+            target_file = t
+            scan_media_file(t)
+            break
+        except Exception:
+            continue
+
+    if is_running_on_android() and target_file:
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            RingtoneManager = autoclass("android.media.RingtoneManager")
+            Uri = autoclass("android.net.Uri")
+            File = autoclass("java.io.File")
+            activity = PythonActivity.mActivity
+            if activity:
+                j_file = File(str(target_file.resolve()))
+                j_uri = Uri.fromFile(j_file)
+                RingtoneManager.setActualDefaultRingtoneUri(
+                    activity.getApplicationContext(),
+                    RingtoneManager.TYPE_RINGTONE,
+                    j_uri
+                )
+                return True, f"Ringtone set: {filepath.stem}"
+        except Exception:
+            pass
+
+    if target_file and target_file.exists():
+        return True, f"Saved to Ringtones! Select in Phone Settings: {target_file.name}"
+    return False, "Could not copy to phone ringtones directory"
 
 
 def find_ffmpeg_binary() -> Optional[str]:
@@ -2454,8 +2557,14 @@ if KIVY_AVAILABLE:
             self.download_state = {
                 "is_active": False,
                 "cancel_requested": False,
+                "is_paused": False,
                 "current_part_files": set(),
             }
+            self.download_queue: List[Dict[str, Any]] = []
+            self.turbo_mode = True
+            self.is_vault_unlocked = False
+            self.sleep_timer_event = None
+            self.sleep_timer_end_time = 0.0
             self.current_sound = None
             self.current_track_path: Optional[Path] = None
             self.is_audio_playing = False
@@ -2502,8 +2611,14 @@ if KIVY_AVAILABLE:
             self.download_state = {
                 "is_active": False,
                 "cancel_requested": False,
+                "is_paused": False,
                 "current_part_files": set(),
             }
+            self.download_queue = []
+            self.turbo_mode = True
+            self.is_vault_unlocked = False
+            self.sleep_timer_event = None
+            self.sleep_timer_end_time = 0.0
 
             # Floating Mini Music Player state
             self.current_sound = None
@@ -2656,6 +2771,39 @@ if KIVY_AVAILABLE:
 
             return header_card
 
+        def get_storage_stats(self) -> Tuple[int, int, int]:
+            """Return (download_bytes, total_disk_bytes, free_disk_bytes)."""
+            d_dir = get_android_download_dir()
+            dl_bytes = 0
+            if d_dir.exists():
+                for p in d_dir.rglob("*"):
+                    if p.is_file():
+                        try:
+                            dl_bytes += p.stat().st_size
+                        except Exception:
+                            pass
+            try:
+                usage = shutil.disk_usage(str(d_dir))
+                return dl_bytes, usage.total, usage.free
+            except Exception:
+                return dl_bytes, 0, 0
+
+        def clean_cache_and_temp_files(self) -> int:
+            """Clean orphan .part, .ytdl, and temporary cache files. Returns freed bytes."""
+            d_dir = get_android_download_dir()
+            freed = 0
+            if d_dir.exists():
+                for p in list(d_dir.glob("*.part")) + list(d_dir.glob("*.ytdl")):
+                    if self.download_state.get("is_active") and str(p) in self.download_state.get("current_part_files", set()):
+                        continue
+                    try:
+                        sz = p.stat().st_size
+                        p.unlink(missing_ok=True)
+                        freed += sz
+                    except Exception:
+                        pass
+            return freed
+
         def open_settings_modal(self):
             """Open in-app Settings modal for quality preference, clipboard toggle, storage info, and app details."""
             modal = ModalView(size_hint=(0.92, 0.78), auto_dismiss=True)
@@ -2759,7 +2907,104 @@ if KIVY_AVAILABLE:
             clip_card.add_widget(clip_btn)
             body_layout.add_widget(clip_card)
 
-            # Section 3: Storage Location
+            # Section 3: Speed Turbo Mode
+            turbo_card = StyledCard(orientation="vertical", padding=[dp(12), dp(10)], spacing=dp(6), size_hint_y=None, height=dp(78), bg_color=(0.11, 0.13, 0.20, 1.0))
+            turbo_lbl = Label(
+                text="[b]Download Speed Turbo Mode[/b]\n[size=10.5sp][color=#90CAF9]8x Multi-threaded fragment streams & 20MB buffers[/color][/size]",
+                markup=True,
+                font_size="12sp",
+                halign="left",
+                size_hint_y=None,
+                height=dp(30),
+            )
+            turbo_lbl.bind(size=turbo_lbl.setter("text_size"))
+            turbo_card.add_widget(turbo_lbl)
+
+            turbo_btn = Button(
+                text="TURBO SPEED: ON (8x Fast)" if self.turbo_mode else "TURBO SPEED: OFF (Standard)",
+                font_size="11.5sp",
+                bold=True,
+                size_hint_y=None,
+                height=dp(32),
+                background_color=(0.10, 0.55, 0.28, 1.0) if self.turbo_mode else (0.28, 0.22, 0.18, 1.0),
+                color=(1, 1, 1, 1),
+            )
+            def toggle_turbo(ins):
+                self.turbo_mode = not self.turbo_mode
+                if self.turbo_mode:
+                    ins.text = "TURBO SPEED: ON (8x Fast)"
+                    ins.background_color = (0.10, 0.55, 0.28, 1.0)
+                    self.update_status("[color=#00E676]Speed Turbo Mode Enabled![/color] (8x Streams)", 0)
+                else:
+                    ins.text = "TURBO SPEED: OFF (Standard)"
+                    ins.background_color = (0.28, 0.22, 0.18, 1.0)
+                    self.update_status("Turbo Mode Disabled (Standard)", 0)
+            turbo_btn.bind(on_press=toggle_turbo)
+            turbo_card.add_widget(turbo_btn)
+            body_layout.add_widget(turbo_card)
+
+            # Section 4: Storage & Performance (1-Tap Cache Cleaner)
+            dl_b, total_b, free_b = self.get_storage_stats()
+            perf_card = StyledCard(orientation="vertical", padding=[dp(12), dp(10)], spacing=dp(6), size_hint_y=None, height=dp(108), bg_color=(0.11, 0.13, 0.20, 1.0))
+            perf_lbl = Label(
+                text=f"[b]Storage & Performance[/b]\n[size=10.5sp][color=#90CAF9]Downloads: [color=#FFD54F]{format_bytes(dl_b)}[/color]  •  Free: [color=#81C784]{format_bytes(free_b)}[/color][/size]",
+                markup=True,
+                font_size="12sp",
+                halign="left",
+                size_hint_y=None,
+                height=dp(32),
+            )
+            perf_lbl.bind(size=perf_lbl.setter("text_size"))
+            perf_card.add_widget(perf_lbl)
+
+            clean_btn = Button(
+                text="🧹 1-TAP CLEAN CACHE & TEMP CHUNKS",
+                font_size="11sp",
+                bold=True,
+                size_hint_y=None,
+                height=dp(32),
+                background_color=(0.18, 0.24, 0.38, 1.0),
+                color=(1, 0.85, 0.3, 1),
+            )
+            def run_cleaner(ins):
+                freed = self.clean_cache_and_temp_files()
+                clean_msg = f"Cleaned {format_bytes(freed)} temp files!" if freed > 0 else "Storage is already clean! (0 bytes)"
+                ins.text = f"✓ {clean_msg}"
+                ins.background_color = (0.10, 0.45, 0.22, 1.0)
+                self.update_status(f"[color=#00E676]{clean_msg}[/color]", 0)
+                nb_dl, nb_tot, nb_free = self.get_storage_stats()
+                perf_lbl.text = f"[b]Storage & Performance[/b]\n[size=10.5sp][color=#90CAF9]Downloads: [color=#FFD54F]{format_bytes(nb_dl)}[/color]  •  Free: [color=#81C784]{format_bytes(nb_free)}[/color][/size]"
+            clean_btn.bind(on_press=run_cleaner)
+            perf_card.add_widget(clean_btn)
+            body_layout.add_widget(perf_card)
+
+            # Section 5: Private Vault Security
+            vault_card = StyledCard(orientation="vertical", padding=[dp(12), dp(10)], spacing=dp(6), size_hint_y=None, height=dp(78), bg_color=(0.11, 0.13, 0.20, 1.0))
+            vault_lbl = Label(
+                text="[b]Private Vault Security[/b]\n[size=10.5sp][color=#90CAF9]Set or change 4-digit PIN for hidden media vault[/color][/size]",
+                markup=True,
+                font_size="12sp",
+                halign="left",
+                size_hint_y=None,
+                height=dp(30),
+            )
+            vault_lbl.bind(size=vault_lbl.setter("text_size"))
+            vault_card.add_widget(vault_lbl)
+
+            change_pin_btn = Button(
+                text="🔒 CHANGE VAULT PIN",
+                font_size="11sp",
+                bold=True,
+                size_hint_y=None,
+                height=dp(32),
+                background_color=(0.28, 0.16, 0.26, 1.0),
+                color=(1.0, 0.85, 0.9, 1.0),
+            )
+            change_pin_btn.bind(on_press=lambda ins: (modal.dismiss(), self.open_change_pin_modal()))
+            vault_card.add_widget(change_pin_btn)
+            body_layout.add_widget(vault_card)
+
+            # Section 6: Storage Location
             store_card = StyledCard(orientation="vertical", padding=[dp(12), dp(10)], spacing=dp(4), size_hint_y=None, height=dp(66), bg_color=(0.11, 0.13, 0.20, 1.0))
             store_lbl = Label(
                 text=f"[b]Download Destination[/b]\n[size=10.5sp][color=#B0BEC5]{get_android_download_dir()}[/color][/size]",
@@ -3143,20 +3388,40 @@ if KIVY_AVAILABLE:
             self.status_label.bind(size=self.status_label.setter("text_size"))
             self.status_card.add_widget(self.status_label)
 
-            # Active Download Cancellation Button (Feature 4)
-            self.cancel_download_btn = IconActionButton(
-                icon_path="clear.png",
-                text="CANCEL DOWNLOAD",
-                font_size="11sp",
+            # Active Download Controls: Pause / Resume + Cancel (Resumable Downloading)
+            self.download_ctrl_row = BoxLayout(
+                orientation="horizontal",
+                spacing=dp(8),
                 size_hint_y=None,
                 height=0,
                 opacity=0,
+            )
+            self.pause_resume_btn = Button(
+                text="⏸ PAUSE",
+                font_size="11sp",
+                bold=True,
+                size_hint_x=0.5,
+                background_normal="",
+                background_color=(0.18, 0.32, 0.58, 1.0),
+                color=(1.0, 1.0, 1.0, 1.0),
+            )
+            self.pause_resume_btn.disabled = True
+            self.pause_resume_btn.bind(on_press=lambda ins: self.toggle_download_pause())
+            self.download_ctrl_row.add_widget(self.pause_resume_btn)
+
+            self.cancel_download_btn = IconActionButton(
+                icon_path="clear.png",
+                text="CANCEL",
+                font_size="11sp",
+                size_hint_x=0.5,
                 bg_color=(0.48, 0.12, 0.15, 1.0),
                 text_color=(1.0, 0.9, 0.9, 1.0),
             )
             self.cancel_download_btn.disabled = True
             self.cancel_download_btn.bind(on_press=lambda ins: self.cancel_active_download())
-            self.status_card.add_widget(self.cancel_download_btn)
+            self.download_ctrl_row.add_widget(self.cancel_download_btn)
+
+            self.status_card.add_widget(self.download_ctrl_row)
 
             content.add_widget(self.status_card)
 
@@ -3297,11 +3562,11 @@ if KIVY_AVAILABLE:
             top_row.add_widget(refresh_btn)
             lib_header_card.add_widget(top_row)
 
-            # Filter Row: [📂 ALL] [🎵 SONGS (PLAYLIST)] [🎬 VIDEOS]
-            filter_row = BoxLayout(orientation="horizontal", spacing=dp(6), size_hint_y=None, height=dp(30))
+            # Filter Row: [📂 ALL] [🎵 SONGS (PLAYLIST)] [🎬 VIDEOS] [🔒 VAULT]
+            filter_row = BoxLayout(orientation="horizontal", spacing=dp(5), size_hint_y=None, height=dp(30))
             self.filter_btn_all = Button(
                 text="📂 ALL",
-                font_size="10.5sp",
+                font_size="10sp",
                 bold=True,
                 background_color=(0.18, 0.24, 0.36, 1.0),
                 color=(1, 0.75, 0, 1),
@@ -3309,7 +3574,7 @@ if KIVY_AVAILABLE:
             self.filter_btn_all.bind(on_press=lambda ins: self.set_downloads_filter("all"))
 
             self.filter_btn_audio = Button(
-                text="🎵 SONGS (PLAYLIST)",
+                text="🎵 SONGS",
                 font_size="10sp",
                 bold=True,
                 background_color=(0.12, 0.14, 0.20, 1.0),
@@ -3319,16 +3584,26 @@ if KIVY_AVAILABLE:
 
             self.filter_btn_videos = Button(
                 text="🎬 VIDEOS",
-                font_size="10.5sp",
+                font_size="10sp",
                 bold=True,
                 background_color=(0.12, 0.14, 0.20, 1.0),
                 color=(0.7, 0.75, 0.85, 1),
             )
             self.filter_btn_videos.bind(on_press=lambda ins: self.set_downloads_filter("videos"))
 
+            self.filter_btn_vault = Button(
+                text="🔒 VAULT",
+                font_size="10sp",
+                bold=True,
+                background_color=(0.22, 0.10, 0.16, 1.0),
+                color=(0.8, 0.65, 0.72, 1.0),
+            )
+            self.filter_btn_vault.bind(on_press=lambda ins: self.toggle_vault_filter())
+
             filter_row.add_widget(self.filter_btn_all)
             filter_row.add_widget(self.filter_btn_audio)
             filter_row.add_widget(self.filter_btn_videos)
+            filter_row.add_widget(self.filter_btn_vault)
             lib_header_card.add_widget(filter_row)
 
             content.add_widget(lib_header_card)
@@ -3361,6 +3636,10 @@ if KIVY_AVAILABLE:
             self.update_status(f"[color=#00E676]Playing in Playlist:[/color] {safe_display_text(self.audio_playlist[0].stem)}", 0)
 
         def set_downloads_filter(self, filter_type: str):
+            if filter_type == "vault" and not self.is_vault_unlocked:
+                self.open_vault_pin_modal()
+                return
+
             self.active_filter = filter_type
             inactive_bg = (0.12, 0.14, 0.20, 1.0)
             inactive_col = (0.7, 0.75, 0.85, 1.0)
@@ -3376,7 +3655,24 @@ if KIVY_AVAILABLE:
             self.filter_btn_videos.background_color = active_bg if filter_type == "videos" else inactive_bg
             self.filter_btn_videos.color = active_col if filter_type == "videos" else inactive_col
 
+            if hasattr(self, "filter_btn_vault"):
+                vault_active_bg = (0.45, 0.12, 0.22, 1.0)
+                vault_inactive_bg = (0.22, 0.10, 0.16, 1.0)
+                self.filter_btn_vault.background_color = vault_active_bg if filter_type == "vault" else vault_inactive_bg
+                self.filter_btn_vault.color = (1.0, 0.85, 0.88, 1.0) if filter_type == "vault" else (0.8, 0.65, 0.72, 1.0)
+
             self.refresh_library()
+
+        def toggle_vault_filter(self):
+            if self.active_filter == "vault":
+                self.lock_vault()
+            else:
+                self.set_downloads_filter("vault")
+
+        def lock_vault(self):
+            self.is_vault_unlocked = False
+            self.update_status("Private Vault Locked", 0)
+            self.set_downloads_filter("all")
 
         # -----------------------------------------------------------------
         # View 3: Videos View (Search YouTube & Dynamic Trending Picks)
@@ -5286,32 +5582,38 @@ if KIVY_AVAILABLE:
         # -----------------------------------------------------------------
         @mainthread
         def refresh_library(self):
-            """Scan download folder and populate the offline library card with Play and Delete actions."""
+            """Scan download folder or private vault and populate offline library card with actions."""
             try:
                 self.library_container.clear_widgets()
-                target_dir = get_android_download_dir()
-                if not target_dir.exists():
-                    target_dir.mkdir(parents=True, exist_ok=True)
 
-                search_dirs = [target_dir]
-                if is_running_on_android():
-                    try:
-                        from jnius import autoclass
-                        PythonActivity = autoclass("org.kivy.android.PythonActivity")
-                        Environment = autoclass("android.os.Environment")
-                        ctx = PythonActivity.mActivity
-                        if ctx:
-                            ext_d = ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-                            if ext_d:
-                                p_d = Path(ext_d.getAbsolutePath())
-                                if p_d.exists() and p_d not in search_dirs:
-                                    search_dirs.append(p_d)
-                    except Exception:
-                        pass
-                    for std_dir in ("/storage/emulated/0/Download", "/storage/emulated/0/Movies", "/storage/emulated/0/Music", "/sdcard/Download"):
-                        sp = Path(std_dir)
-                        if sp.exists() and sp not in search_dirs:
-                            search_dirs.append(sp)
+                is_vault = self.active_filter == "vault"
+                if is_vault:
+                    target_dir = get_vault_dir()
+                    search_dirs = [target_dir]
+                else:
+                    target_dir = get_android_download_dir()
+                    if not target_dir.exists():
+                        target_dir.mkdir(parents=True, exist_ok=True)
+
+                    search_dirs = [target_dir]
+                    if is_running_on_android():
+                        try:
+                            from jnius import autoclass
+                            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+                            Environment = autoclass("android.os.Environment")
+                            ctx = PythonActivity.mActivity
+                            if ctx:
+                                ext_d = ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                                if ext_d:
+                                    p_d = Path(ext_d.getAbsolutePath())
+                                    if p_d.exists() and p_d not in search_dirs:
+                                        search_dirs.append(p_d)
+                        except Exception:
+                            pass
+                        for std_dir in ("/storage/emulated/0/Download", "/storage/emulated/0/Movies", "/storage/emulated/0/Music", "/sdcard/Download"):
+                            sp = Path(std_dir)
+                            if sp.exists() and sp not in search_dirs:
+                                search_dirs.append(sp)
 
                 # Scan media files
                 scanned_names = set()
@@ -5329,19 +5631,27 @@ if KIVY_AVAILABLE:
                 # Sort newest first
                 all_files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
 
-                # Update bottom nav badge
-                self.nav_btn_downloads.text = f"DOWNLOADS ({len(all_files)})"
+                # Update bottom nav badge (counts public downloads only)
+                if not is_vault:
+                    self.nav_btn_downloads.text = f"DOWNLOADS ({len(all_files)})"
 
                 # Apply active filter
-                if self.active_filter == "videos":
+                if is_vault:
+                    media_files = all_files
+                    if hasattr(self, "downloads_title_lbl"):
+                        self.downloads_title_lbl.text = f"[b]🔒 Private Media Vault ({len(media_files)})[/b]"
+                elif self.active_filter == "videos":
                     media_files = [p for p in all_files if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".3gp")]
+                    if hasattr(self, "downloads_title_lbl"):
+                        self.downloads_title_lbl.text = f"[b]Downloaded Videos ({len(media_files)})[/b]"
                 elif self.active_filter == "audio":
                     media_files = [p for p in all_files if p.suffix.lower() in (".mp3", ".m4a", ".wav", ".ogg", ".opus", ".flac", ".aac")]
+                    if hasattr(self, "downloads_title_lbl"):
+                        self.downloads_title_lbl.text = f"[b]Downloaded Songs ({len(media_files)})[/b]"
                 else:
                     media_files = all_files
-
-                if hasattr(self, "downloads_title_lbl"):
-                    self.downloads_title_lbl.text = f"[b]Downloaded Media ({len(media_files)})[/b]"
+                    if hasattr(self, "downloads_title_lbl"):
+                        self.downloads_title_lbl.text = f"[b]Downloaded Media ({len(media_files)})[/b]"
 
                 if not media_files:
                     empty_card = StyledCard(
@@ -5352,8 +5662,13 @@ if KIVY_AVAILABLE:
                         height=dp(94),
                         bg_color=(0.08, 0.10, 0.15, 1.0),
                     )
+                    empty_msg = (
+                        "Vault is currently empty!\nUse 🔒 LOCK button on any downloaded media to hide it here."
+                        if is_vault
+                        else "No downloaded files found in this category.\nVideos downloaded from Home will appear here!"
+                    )
                     empty_lbl = Label(
-                        text="No downloaded files found in this category.\nVideos downloaded from Home will appear here!",
+                        text=empty_msg,
                         font_size="11.5sp",
                         color=(0.60, 0.65, 0.75, 1.0),
                         halign="center",
@@ -5370,12 +5685,12 @@ if KIVY_AVAILABLE:
                     is_audio_file = media_path.suffix.lower() in (".mp3", ".m4a", ".wav", ".ogg", ".opus", ".flac", ".aac")
                     tag_str = "[AUDIO]" if is_audio_file else "[VIDEO]"
                     tag_color = "#FFA000" if is_audio_file else "#00E676"
-                    player_mode_str = "Mini Music Player" if is_audio_file else "In-App Video Player"
+                    player_mode_str = "Mini Player" if is_audio_file else "Video Player"
 
                     row = StyledCard(
                         orientation="horizontal",
-                        padding=[dp(10), dp(6)],
-                        spacing=dp(8),
+                        padding=[dp(8), dp(6)],
+                        spacing=dp(5),
                         size_hint_y=None,
                         height=dp(58),
                         bg_color=(0.10, 0.12, 0.18, 1.0),
@@ -5386,7 +5701,7 @@ if KIVY_AVAILABLE:
                     item_lbl = Label(
                         text=f"[b][color={tag_color}]{tag_str}[/color] {clean_name}[/b]\n[size=10sp][color=#90CAF9]{size_str}[/color] • [color=#78909C]{media_path.suffix.upper()}[/color] • [color=#81D4FA]{player_mode_str}[/color][/size]",
                         markup=True,
-                        font_size="11.5sp",
+                        font_size="11sp",
                         color=(0.92, 0.94, 0.98, 1.0),
                         size_hint_x=1.0,
                         halign="left",
@@ -5406,38 +5721,72 @@ if KIVY_AVAILABLE:
                     item_lbl.bind(on_touch_down=on_item_click)
                     row.add_widget(item_lbl)
 
-                    # PLAY BUTTON with icon - Plays audio in mini player, videos in native video player
+                    # PLAY BUTTON
+                    play_btn = IconActionButton(
+                        icon_path="play.png",
+                        text="PLAY",
+                        font_size="10.5sp",
+                        size_hint=(None, None),
+                        size=(dp(58), dp(34)),
+                        bg_color=(0.10, 0.55, 0.28, 1.0),
+                        text_color=(1, 1, 1, 1),
+                    )
                     if is_audio_file:
-                        play_btn = IconActionButton(
-                            icon_path="play.png",
-                            text="PLAY",
-                            font_size="11sp",
-                            size_hint=(None, None),
-                            size=(dp(72), dp(34)),
-                            bg_color=(0.10, 0.55, 0.28, 1.0),
-                            text_color=(1, 1, 1, 1),
-                        )
                         play_btn.bind(on_press=lambda ins, p=media_path: self.play_audio_track(p))
                     else:
-                        play_btn = IconActionButton(
-                            icon_path="play.png",
-                            text="PLAY",
-                            font_size="11sp",
-                            size_hint=(None, None),
-                            size=(dp(72), dp(34)),
-                            bg_color=(0.08, 0.50, 0.24, 1.0),
-                            text_color=(1, 1, 1, 1),
-                        )
                         play_btn.bind(on_press=lambda ins, p=media_path: self.play_video_file(p))
                     row.add_widget(play_btn)
 
-                    # DELETE BUTTON with icon
+                    if is_vault:
+                        # RESTORE BUTTON (Restores from Vault to public downloads)
+                        unlock_btn = IconActionButton(
+                            icon_path="download.png",
+                            text="RESTORE",
+                            font_size="10sp",
+                            size_hint=(None, None),
+                            size=(dp(66), dp(34)),
+                            bg_color=(0.14, 0.36, 0.58, 1.0),
+                            text_color=(1, 1, 1, 1),
+                        )
+                        unlock_btn.bind(on_press=lambda ins, p=media_path: self.restore_file_from_vault(p))
+                        row.add_widget(unlock_btn)
+                    else:
+                        # LOCK BUTTON (Moves to Private Vault)
+                        lock_btn = IconActionButton(
+                            text="🔒",
+                            font_size="11sp",
+                            size_hint=(None, None),
+                            size=(dp(34), dp(34)),
+                            bg_color=(0.35, 0.12, 0.22, 1.0),
+                            text_color=(1.0, 0.8, 0.85, 1.0),
+                        )
+                        lock_btn.bind(on_press=lambda ins, p=media_path: self.move_file_to_vault(p))
+                        row.add_widget(lock_btn)
+
+                        # Audio-specific: SET AS RINGTONE BUTTON
+                        if is_audio_file:
+                            ring_btn = IconActionButton(
+                                text="🔔",
+                                font_size="11sp",
+                                size_hint=(None, None),
+                                size=(dp(34), dp(34)),
+                                bg_color=(0.12, 0.35, 0.45, 1.0),
+                                text_color=(0.8, 0.95, 1.0, 1.0),
+                            )
+                            def do_ring(ins, p=media_path):
+                                ok, msg = set_audio_as_ringtone(p)
+                                col = "#00E676" if ok else "#FF5252"
+                                self.update_status(f"[color={col}]{msg}[/color]", 0)
+                            ring_btn.bind(on_press=do_ring)
+                            row.add_widget(ring_btn)
+
+                    # DELETE BUTTON
                     del_btn = IconActionButton(
                         icon_path="delete.png",
                         text="DEL",
-                        font_size="11sp",
+                        font_size="10.5sp",
                         size_hint=(None, None),
-                        size=(dp(64), dp(34)),
+                        size=(dp(48), dp(34)),
                         bg_color=(0.60, 0.12, 0.12, 1.0),
                         text_color=(1, 1, 1, 1),
                     )
@@ -5451,7 +5800,6 @@ if KIVY_AVAILABLE:
 
         def on_delete_clicked(self, file_path: Path, row_widget: Optional[Any] = None):
             """Delete file from device and refresh list with instant visual feedback."""
-            # Immediate UI removal so user sees instant response
             if row_widget and row_widget in self.library_container.children:
                 self.library_container.remove_widget(row_widget)
 
@@ -5470,36 +5818,326 @@ if KIVY_AVAILABLE:
 
             threading.Thread(target=async_delete, daemon=True).start()
 
-        def on_platform_chip_clicked(self, platform_name: str):
-            """Handle platform chip selection and update contextual placeholder."""
-            self.selected_platform = platform_name
-            for name, btn in getattr(self, "platform_chips", {}).items():
-                if name == platform_name:
-                    btn.background_color = (1.0, 0.72, 0.0, 1.0)
-                    btn.color = (0.05, 0.07, 0.12, 1.0)
-                else:
-                    btn.background_color = (0.12, 0.15, 0.22, 1.0)
-                    btn.color = (0.75, 0.80, 0.90, 1.0)
+        def move_file_to_vault(self, file_path: Path):
+            """Move a media file from downloads to private vault (.vault/.nomedia)."""
+            if not file_path or not file_path.exists():
+                return
+            v_dir = get_vault_dir()
+            dest = v_dir / file_path.name
+            try:
+                shutil.move(str(file_path), str(dest))
+                scan_media_file(file_path)
+                self.update_status(f"[color=#FFB300]Moved to Private Vault:[/color] {safe_display_text(file_path.stem)}", 0)
+                self.refresh_library()
+            except Exception as e:
+                self.update_status(f"[color=#FF5252]Failed to lock file:[/color] {e}", 0)
 
-            hints = {
-                "ALL": "Search YouTube or paste any video/playlist link...",
-                "YOUTUBE": "Paste YouTube link or search videos & playlists...",
-                "INSTAGRAM": "Paste Instagram Reel or Post link...",
-                "FACEBOOK": "Paste Facebook video or reel link...",
-                "TIKTOK": "Paste TikTok video link...",
-                "TWITTER / X": "Paste Twitter / X video link...",
-            }
-            if hasattr(self, "url_input"):
-                self.url_input.hint_text = hints.get(platform_name, "Paste video or audio link...")
+        def restore_file_from_vault(self, file_path: Path):
+            """Restore a media file from private vault back to public downloads directory."""
+            if not file_path or not file_path.exists():
+                return
+            d_dir = get_android_download_dir()
+            dest = d_dir / file_path.name
+            try:
+                shutil.move(str(file_path), str(dest))
+                scan_media_file(dest)
+                self.update_status(f"[color=#00E676]Restored to Downloads:[/color] {safe_display_text(dest.stem)}", 0)
+                self.refresh_library()
+            except Exception as e:
+                self.update_status(f"[color=#FF5252]Failed to unlock file:[/color] {e}", 0)
+
+        def open_vault_pin_modal(self, on_success=None):
+            """Prompt user to enter 4-digit PIN to access private vault."""
+            modal = ModalView(size_hint=(0.85, 0.42), auto_dismiss=True)
+            card = StyledCard(
+                orientation="vertical",
+                padding=[dp(16), dp(16)],
+                spacing=dp(10),
+                bg_color=(0.09, 0.11, 0.18, 1.0),
+                radius=14,
+            )
+
+            title_lbl = Label(
+                text="[b]🔒 Enter Vault PIN[/b]\n[size=10.5sp][color=#B0BEC5]Protected Media Storage (Default: 0000)[/color][/size]",
+                markup=True,
+                font_size="14sp",
+                halign="center",
+                size_hint_y=None,
+                height=dp(38),
+            )
+            title_lbl.bind(size=title_lbl.setter("text_size"))
+            card.add_widget(title_lbl)
+
+            pin_input = TextInput(
+                hint_text="••••",
+                password=True,
+                input_filter="int",
+                multiline=False,
+                halign="center",
+                font_size="22sp",
+                size_hint_y=None,
+                height=dp(42),
+                background_color=(0.14, 0.17, 0.26, 1.0),
+                foreground_color=(1, 1, 1, 1),
+            )
+            card.add_widget(pin_input)
+
+            err_lbl = Label(
+                text="",
+                markup=True,
+                font_size="11sp",
+                size_hint_y=None,
+                height=dp(18),
+                halign="center",
+            )
+            err_lbl.bind(size=err_lbl.setter("text_size"))
+            card.add_widget(err_lbl)
+
+            btn_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(36))
+            cancel_btn = Button(
+                text="CANCEL",
+                font_size="11sp",
+                background_color=(0.20, 0.22, 0.30, 1.0),
+                color=(0.8, 0.85, 0.95, 1.0),
+            )
+            cancel_btn.bind(on_press=modal.dismiss)
+            btn_row.add_widget(cancel_btn)
+
+            unlock_btn = Button(
+                text="UNLOCK",
+                font_size="11sp",
+                bold=True,
+                background_color=(0.10, 0.55, 0.28, 1.0),
+                color=(1, 1, 1, 1),
+            )
+            def do_unlock(ins):
+                pin = pin_input.text.strip()
+                if check_vault_pin(pin):
+                    self.is_vault_unlocked = True
+                    modal.dismiss()
+                    self.update_status("[color=#00E676]Vault Unlocked[/color]", 0)
+                    if on_success:
+                        on_success()
+                    else:
+                        self.set_downloads_filter("vault")
+                else:
+                    err_lbl.text = "[color=#FF5252]Incorrect PIN! Please try again.[/color]"
+                    pin_input.text = ""
+            unlock_btn.bind(on_press=do_unlock)
+            btn_row.add_widget(unlock_btn)
+            card.add_widget(btn_row)
+
+            modal.add_widget(card)
+            modal.open()
+
+        def open_change_pin_modal(self):
+            """Allow user to change the 4-digit Vault PIN."""
+            modal = ModalView(size_hint=(0.88, 0.52), auto_dismiss=True)
+            card = StyledCard(
+                orientation="vertical",
+                padding=[dp(16), dp(16)],
+                spacing=dp(8),
+                bg_color=(0.09, 0.11, 0.18, 1.0),
+                radius=14,
+            )
+
+            title_lbl = Label(
+                text="[b]🔒 Set New Vault PIN[/b]\n[size=10.5sp][color=#B0BEC5]Enter current PIN & new 4-digit PIN[/color][/size]",
+                markup=True,
+                font_size="14sp",
+                halign="center",
+                size_hint_y=None,
+                height=dp(36),
+            )
+            title_lbl.bind(size=title_lbl.setter("text_size"))
+            card.add_widget(title_lbl)
+
+            old_pin_input = TextInput(
+                hint_text="Current PIN (Default: 0000)",
+                password=True,
+                input_filter="int",
+                multiline=False,
+                halign="center",
+                font_size="13sp",
+                size_hint_y=None,
+                height=dp(38),
+                background_color=(0.14, 0.17, 0.26, 1.0),
+                foreground_color=(1, 1, 1, 1),
+            )
+            card.add_widget(old_pin_input)
+
+            new_pin_input = TextInput(
+                hint_text="New 4-Digit PIN",
+                password=True,
+                input_filter="int",
+                multiline=False,
+                halign="center",
+                font_size="13sp",
+                size_hint_y=None,
+                height=dp(38),
+                background_color=(0.14, 0.17, 0.26, 1.0),
+                foreground_color=(1, 1, 1, 1),
+            )
+            card.add_widget(new_pin_input)
+
+            err_lbl = Label(
+                text="",
+                markup=True,
+                font_size="10.5sp",
+                size_hint_y=None,
+                height=dp(18),
+                halign="center",
+            )
+            err_lbl.bind(size=err_lbl.setter("text_size"))
+            card.add_widget(err_lbl)
+
+            btn_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(36))
+            cancel_btn = Button(
+                text="CANCEL",
+                font_size="11sp",
+                background_color=(0.20, 0.22, 0.30, 1.0),
+                color=(0.8, 0.85, 0.95, 1.0),
+            )
+            cancel_btn.bind(on_press=modal.dismiss)
+            btn_row.add_widget(cancel_btn)
+
+            save_btn = Button(
+                text="SAVE PIN",
+                font_size="11sp",
+                bold=True,
+                background_color=(0.10, 0.55, 0.28, 1.0),
+                color=(1, 1, 1, 1),
+            )
+            def do_save(ins):
+                cur = old_pin_input.text.strip()
+                new_p = new_pin_input.text.strip()
+                if not check_vault_pin(cur):
+                    err_lbl.text = "[color=#FF5252]Current PIN is incorrect![/color]"
+                    return
+                if len(new_p) < 4:
+                    err_lbl.text = "[color=#FF5252]New PIN must be at least 4 digits![/color]"
+                    return
+                set_vault_pin(new_p)
+                modal.dismiss()
+                self.update_status("[color=#00E676]Vault PIN changed successfully![/color]", 0)
+            save_btn.bind(on_press=do_save)
+            btn_row.add_widget(save_btn)
+            card.add_widget(btn_row)
+
+            modal.add_widget(card)
+            modal.open()
+
+        def open_sleep_timer_modal(self):
+            """Open sleep timer duration picker modal for background audio playback."""
+            modal = ModalView(size_hint=(0.85, 0.48), auto_dismiss=True)
+            card = StyledCard(
+                orientation="vertical",
+                padding=[dp(16), dp(16)],
+                spacing=dp(8),
+                bg_color=(0.09, 0.11, 0.18, 1.0),
+                radius=14,
+            )
+
+            title_lbl = Label(
+                text="[b]⏱ Audio Sleep Timer[/b]\n[size=10.5sp][color=#90CAF9]Stop playback automatically after timer ends[/color][/size]",
+                markup=True,
+                font_size="14sp",
+                halign="center",
+                size_hint_y=None,
+                height=dp(36),
+            )
+            title_lbl.bind(size=title_lbl.setter("text_size"))
+            card.add_widget(title_lbl)
+
+            options = [
+                ("15 Minutes", 15),
+                ("30 Minutes", 30),
+                ("45 Minutes", 45),
+                ("60 Minutes", 60),
+                ("Turn Off Timer", 0),
+            ]
+
+            for label_text, minutes in options:
+                btn = Button(
+                    text=label_text,
+                    font_size="11.5sp",
+                    bold=(minutes > 0),
+                    size_hint_y=None,
+                    height=dp(34),
+                    background_color=(0.14, 0.22, 0.36, 1.0) if minutes > 0 else (0.28, 0.12, 0.14, 1.0),
+                    color=(1, 1, 1, 1),
+                )
+                def set_timer_cb(ins, m=minutes, m_modal=modal):
+                    self.set_sleep_timer(m)
+                    m_modal.dismiss()
+                btn.bind(on_press=set_timer_cb)
+                card.add_widget(btn)
+
+            modal.add_widget(card)
+            modal.open()
+
+        def set_sleep_timer(self, minutes: int):
+            """Configure or cancel the audio sleep timer."""
+            if self.sleep_timer_event:
+                try:
+                    self.sleep_timer_event.cancel()
+                except Exception:
+                    pass
+                self.sleep_timer_event = None
+
+            if minutes <= 0:
+                self.sleep_timer_end_time = 0.0
+                if hasattr(self, "mini_player_timer_btn"):
+                    self.mini_player_timer_btn.text_color = (0.9, 0.8, 1.0, 1.0)
+                self.update_status("Sleep Timer turned OFF", 0)
+                return
+
+            secs = minutes * 60
+            self.sleep_timer_end_time = time.time() + secs
+            if hasattr(self, "mini_player_timer_btn"):
+                self.mini_player_timer_btn.text_color = (0.0, 0.9, 0.5, 1.0)
+            self.sleep_timer_event = Clock.schedule_once(self.on_sleep_timer_fired, secs)
+            self.update_status(f"[color=#00E676]Sleep Timer Set:[/color] Music will stop in {minutes} min", 0)
+
+        def on_sleep_timer_fired(self, dt=None):
+            """Called when sleep timer expires: pauses playback safely."""
+            if self.is_audio_playing:
+                self.toggle_audio_playback()
+            self.sleep_timer_event = None
+            self.sleep_timer_end_time = 0.0
+            if hasattr(self, "mini_player_timer_btn"):
+                self.mini_player_timer_btn.text_color = (0.9, 0.8, 1.0, 1.0)
+            self.update_status("[color=#FFB300]Sleep timer completed:[/color] Audio playback paused.", 0)
+
+        def toggle_download_pause(self):
+            """Toggle pause/resume state for the active download (Resumable Downloading)."""
+            if not self.download_state.get("is_active"):
+                return
+            new_paused = not self.download_state.get("is_paused", False)
+            self.download_state["is_paused"] = new_paused
+            if hasattr(self, "pause_resume_btn"):
+                if new_paused:
+                    self.pause_resume_btn.text = "▶ RESUME"
+                    self.pause_resume_btn.background_color = (0.15, 0.45, 0.25, 1.0)
+                else:
+                    self.pause_resume_btn.text = "⏸ PAUSE"
+                    self.pause_resume_btn.background_color = (0.18, 0.32, 0.58, 1.0)
+            if new_paused:
+                self.update_status("[color=#FFB300]Download paused.[/color] Chunks kept. Tap Resume to continue.", self.progress_bar.value)
+            else:
+                self.update_status("[color=#00E676]Resuming download...[/color]", self.progress_bar.value)
 
         def cancel_active_download(self):
             """Trigger immediate cancellation of running download and partial file cleanup (Feature 4)."""
             if not self.download_state.get("is_active"):
                 return
             self.download_state["cancel_requested"] = True
+            self.download_state["is_paused"] = False
             self.update_status("[color=#FFB300]Cancelling download...[/color]", 0)
             if hasattr(self, "cancel_download_btn"):
                 self.cancel_download_btn.disabled = True
+            if hasattr(self, "pause_resume_btn"):
+                self.pause_resume_btn.disabled = True
 
         def create_mini_player_bar(self) -> BoxLayout:
             """Persistent mini audio player bar floating directly above footer navigation (Feature 3)."""
@@ -5603,6 +6241,18 @@ if KIVY_AVAILABLE:
             )
             self.mini_player_next_btn.bind(on_press=lambda ins: self.play_next_audio())
             ctrl_row.add_widget(self.mini_player_next_btn)
+
+            self.mini_player_timer_btn = IconActionButton(
+                text="⏱",
+                font_size="13sp",
+                size_hint=(None, None),
+                size=(dp(32), dp(32)),
+                bg_color=(0.14, 0.18, 0.28, 1.0),
+                text_color=(0.9, 0.8, 1.0, 1.0),
+                pos_hint={"center_y": 0.5},
+            )
+            self.mini_player_timer_btn.bind(on_press=lambda ins: self.open_sleep_timer_modal())
+            ctrl_row.add_widget(self.mini_player_timer_btn)
 
             self.mini_player_close_btn = IconActionButton(
                 icon_path="clear.png",
@@ -5749,30 +6399,26 @@ if KIVY_AVAILABLE:
             """Update mini player progress bar and elapsed/duration label."""
             if not self.current_sound:
                 return
+
+            timer_suffix = ""
+            if self.sleep_timer_end_time > 0:
+                rem = int(self.sleep_timer_end_time - time.time())
+                if rem > 0:
+                    mins = rem // 60
+                    secs = rem % 60
+                    timer_suffix = f" • [color=#00E676]⏱ {mins}:{secs:02d}[/color]"
+                else:
+                    self.sleep_timer_end_time = 0.0
+
             if self.current_sound.state == "play":
                 pos = self.current_sound.get_pos()
                 length = self.current_sound.length or 0
                 if length > 0:
                     pct = (pos / length) * 100
                     self.mini_player_progress.value = min(100, max(0, pct))
-                    self.mini_player_time.text = f"{format_duration(pos)} / {format_duration(length)} • Playing"
+                    self.mini_player_time.text = f"{format_duration(pos)} / {format_duration(length)} • Playing{timer_suffix}"
                 else:
-                    self.mini_player_time.text = f"{format_duration(pos)} • Playing"
-            elif self.current_sound.state == "stop" and self.is_audio_playing:
-                pos = self.current_sound.get_pos()
-                length = self.current_sound.length or 0
-                if length > 0 and pos >= (length - 1.0):
-                    self.play_next_audio()
-                return
-            if self.current_sound.state == "play":
-                pos = self.current_sound.get_pos()
-                length = self.current_sound.length or 0
-                if length > 0:
-                    pct = (pos / length) * 100
-                    self.mini_player_progress.value = min(100, max(0, pct))
-                    self.mini_player_time.text = f"{format_duration(pos)} / {format_duration(length)} • Playing"
-                else:
-                    self.mini_player_time.text = f"{format_duration(pos)} • Playing"
+                    self.mini_player_time.text = f"{format_duration(pos)} • Playing{timer_suffix}"
             elif self.current_sound.state == "stop" and self.is_audio_playing:
                 pos = self.current_sound.get_pos()
                 length = self.current_sound.length or 0
@@ -6091,12 +6737,33 @@ if KIVY_AVAILABLE:
             is_audio = "Audio" in selected_format
             plat = detect_media_platform(url)
 
-            # Update active download state (Feature 4)
+            # Automated Download Queue: If download already in progress, enqueue request
+            if self.download_state.get("is_active"):
+                self.download_queue.append({
+                    "chosen_format": chosen_format,
+                    "is_playlist": is_playlist,
+                    "selected_indices": selected_indices,
+                    "entries": entries,
+                    "url": normalized,
+                })
+                q_pos = len(self.download_queue)
+                self.update_status(f"[color=#FFB300]Added to Queue (#{q_pos})[/color] - Will download automatically.", self.progress_bar.value)
+                return
+
+            # Update active download state
             self.download_state["is_active"] = True
             self.download_state["cancel_requested"] = False
+            self.download_state["is_paused"] = False
             self.download_state["current_part_files"].clear()
 
             self.download_btn.disabled = True
+            if hasattr(self, "download_ctrl_row"):
+                self.download_ctrl_row.height = dp(34)
+                self.download_ctrl_row.opacity = 1.0
+            if hasattr(self, "pause_resume_btn"):
+                self.pause_resume_btn.disabled = False
+                self.pause_resume_btn.text = "⏸ PAUSE"
+                self.pause_resume_btn.background_color = (0.18, 0.32, 0.58, 1.0)
             if hasattr(self, "cancel_download_btn"):
                 self.cancel_download_btn.disabled = False
                 self.cancel_download_btn.height = dp(32)
@@ -6120,6 +6787,12 @@ if KIVY_AVAILABLE:
                     current_item_meta = {"index": 1, "total": 1, "title": "Video"}
 
                     def progress_hook(d):
+                        if self.download_state.get("cancel_requested"):
+                            raise DownloadCancelledException("Download cancelled by user.")
+
+                        while self.download_state.get("is_paused") and not self.download_state.get("cancel_requested"):
+                            time.sleep(0.35)
+
                         if self.download_state.get("cancel_requested"):
                             raise DownloadCancelledException("Download cancelled by user.")
 
@@ -6166,6 +6839,7 @@ if KIVY_AVAILABLE:
                     has_ffmpeg = bool(ffmpeg_path)
                     safe_logger = AndroidYTDLLogger()
 
+                    is_turbo = getattr(self, "turbo_mode", True)
                     base_ydl_opts = {
                         "windowsfilenames": True,
                         "trim_file_name": 215,
@@ -6178,11 +6852,11 @@ if KIVY_AVAILABLE:
                         "no_warnings": True,
                         "no_color": True,
                         "nooverwrites": False,
-                        "continuedl": False,
+                        "continuedl": True,
                         "noplaylist": True,
-                        "concurrent_fragment_downloads": 4,
-                        "buffersize": 1048576,
-                        "http_chunk_size": 10485760,
+                        "concurrent_fragment_downloads": 8 if is_turbo else 3,
+                        "buffersize": 2097152 if is_turbo else 524288,
+                        "http_chunk_size": 20971520 if is_turbo else 5242880,
                     }
 
                     if ffmpeg_path:
@@ -6560,17 +7234,40 @@ if KIVY_AVAILABLE:
                 finally:
                     self.download_state["is_active"] = False
                     self.download_state["cancel_requested"] = False
+                    self.download_state["is_paused"] = False
                     self.download_state["current_part_files"].clear()
                     def reset_ui_state(dt=None):
                         self.download_btn.disabled = False
                         self.download_btn.text = "DOWNLOAD NOW"
                         self.current_preview_url = ""
+                        if hasattr(self, "download_ctrl_row"):
+                            self.download_ctrl_row.height = 0
+                            self.download_ctrl_row.opacity = 0
+                        if hasattr(self, "pause_resume_btn"):
+                            self.pause_resume_btn.disabled = True
+                            self.pause_resume_btn.text = "⏸ PAUSE"
+                            self.pause_resume_btn.background_color = (0.18, 0.32, 0.58, 1.0)
                         if hasattr(self, "cancel_download_btn"):
                             self.cancel_download_btn.disabled = True
                             self.cancel_download_btn.height = 0
                             self.cancel_download_btn.opacity = 0
                         if hasattr(self, "status_card"):
                             self.status_card.height = dp(72)
+
+                        # Process next pending item in download queue if present
+                        if self.download_queue:
+                            next_req = self.download_queue.pop(0)
+                            if next_req.get("url") and hasattr(self, "url_input"):
+                                self.url_input.text = next_req["url"]
+                            Clock.schedule_once(
+                                lambda dt: self.start_download(
+                                    chosen_format=next_req.get("chosen_format"),
+                                    is_playlist=next_req.get("is_playlist", False),
+                                    selected_indices=next_req.get("selected_indices"),
+                                    entries=next_req.get("entries"),
+                                ),
+                                0.25
+                            )
                     Clock.schedule_once(reset_ui_state)
 
             threading.Thread(target=worker, daemon=True).start()

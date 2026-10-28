@@ -345,6 +345,107 @@ def test_is_running_on_android_detection():
         assert is_running_on_android() is True
 
 
+def test_vault_dir_and_nomedia(tmp_path):
+    from mobile_app import get_vault_dir
+    with patch("mobile_app.get_android_download_dir", return_value=tmp_path):
+        v_dir = get_vault_dir()
+        assert v_dir.exists()
+        assert v_dir.is_dir()
+        nomedia = v_dir / ".nomedia"
+        assert nomedia.exists()
+
+
+def test_vault_pin_hashing_and_verification(tmp_path):
+    from mobile_app import check_vault_pin, set_vault_pin, get_vault_pin_hash
+    with patch("mobile_app.get_android_download_dir", return_value=tmp_path):
+        # Default pin is 0000
+        assert check_vault_pin("0000") is True
+        assert check_vault_pin("1234") is False
+
+        # Set new pin
+        set_vault_pin("4321")
+        assert check_vault_pin("4321") is True
+        assert check_vault_pin("0000") is False
+
+        # Hash is 64 hex characters (SHA-256)
+        h = get_vault_pin_hash()
+        assert len(h) == 64
+
+
+def test_set_audio_as_ringtone(tmp_path):
+    from mobile_app import set_audio_as_ringtone
+    # Non-existent file
+    ok, msg = set_audio_as_ringtone(tmp_path / "missing.mp3")
+    assert ok is False
+
+    # Actual file
+    sample = tmp_path / "tune.mp3"
+    sample.write_text("audio-data")
+    with patch("mobile_app.get_android_download_dir", return_value=tmp_path):
+        with patch("mobile_app.scan_media_file") as mock_scan:
+            ok, msg = set_audio_as_ringtone(sample)
+            assert ok is True
+            assert "Ringtones" in msg
+            assert mock_scan.called
+            assert (tmp_path / "Ringtones" / "tune.mp3").exists()
+
+
+def test_storage_cleaner_removes_orphans(tmp_path):
+    from mobile_app import MSKDownloaderMobile
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    app.download_state = {"is_active": False, "current_part_files": set()}
+
+    # Create dummy .part and .ytdl files
+    part_f = tmp_path / "video.mp4.part"
+    part_f.write_text("temp_data_chunk_part")
+    ytdl_f = tmp_path / "song.mp3.ytdl"
+    ytdl_f.write_text("temp_data_chunk_ytdl")
+    valid_f = tmp_path / "actual_video.mp4"
+    valid_f.write_text("permanent_movie")
+
+    with patch("mobile_app.get_android_download_dir", return_value=tmp_path):
+        freed = app.clean_cache_and_temp_files()
+        assert freed > 0
+        assert not part_f.exists()
+        assert not ytdl_f.exists()
+        assert valid_f.exists()
+
+
+def test_pause_and_resume_toggle():
+    from mobile_app import MSKDownloaderMobile
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    app.download_state = {"is_active": True, "is_paused": False}
+    app.update_status = lambda msg, p: None
+    app.progress_bar = type("Obj", (), {"value": 50})()
+
+    # Toggle to paused
+    app.toggle_download_pause()
+    assert app.download_state["is_paused"] is True
+
+    # Toggle to resume
+    app.toggle_download_pause()
+    assert app.download_state["is_paused"] is False
+
+
+def test_sleep_timer_controls():
+    from mobile_app import MSKDownloaderMobile
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    app.sleep_timer_event = None
+    app.sleep_timer_end_time = 0.0
+    app.is_audio_playing = False
+    app.update_status = lambda msg, p: None
+
+    with patch("kivy.clock.Clock.schedule_once") as mock_sched:
+        app.set_sleep_timer(15)
+        assert app.sleep_timer_end_time > 0
+        assert mock_sched.called
+
+        # Turn off
+        app.set_sleep_timer(0)
+        assert app.sleep_timer_end_time == 0.0
+
+
+
 
 
 
