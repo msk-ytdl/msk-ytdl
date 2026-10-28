@@ -633,13 +633,34 @@ def scan_media_file(filepath: Path):
 
 def find_ffmpeg_binary() -> Optional[str]:
     """
-    Locate ffmpeg binary across system PATH, Android app internal directories,
+    Locate a functional ffmpeg binary across system PATH, Android app internal directories,
     or python-for-android buildozer bundles.
+    Strictly verifies that the target is a regular file (not a directory) and is runnable.
     """
+    import subprocess
+
+    def is_usable(binary_path: Union[str, Path]) -> bool:
+        try:
+            p = Path(binary_path)
+            if not p.is_file():
+                return False
+            if os.name != "nt" and not os.access(str(p), os.X_OK):
+                return False
+            res = subprocess.run(
+                [str(p), "-version"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+                check=False,
+            )
+            return res.returncode == 0
+        except Exception:
+            return False
+
     # 1. System PATH
     w = shutil.which("ffmpeg")
-    if w and os.path.isfile(w):
-        return w
+    if w and is_usable(w):
+        return str(w)
 
     # 2. Android app private directories / lib paths
     candidates = [
@@ -647,14 +668,12 @@ def find_ffmpeg_binary() -> Optional[str]:
         Path("/data/data/org.msk.ytdl/files/app/bin/ffmpeg"),
         Path("/data/data/org.msk.ytdl/bin/ffmpeg"),
         Path(__file__).resolve().parent / "bin" / "ffmpeg",
-        Path(__file__).resolve().parent / "ffmpeg",
+        Path(__file__).resolve().parent / "ffmpeg.exe",
     ]
     for c in candidates:
-        try:
-            if c.exists() and (os.access(str(c), os.X_OK) or os.name == "nt"):
-                return str(c)
-        except Exception:
-            pass
+        if is_usable(c):
+            return str(c)
+
     return None
 
 
@@ -6168,6 +6187,9 @@ if KIVY_AVAILABLE:
 
                     if ffmpeg_path:
                         base_ydl_opts["ffmpeg_location"] = ffmpeg_path
+                    else:
+                        base_ydl_opts["allow_unplayable_formats"] = True
+                        base_ydl_opts["ignoreerrors"] = "only_download"
 
                     # Format selector resolution
                     base_ydl_opts["format"] = get_ydl_format_selector(selected_format, has_ffmpeg=has_ffmpeg)
@@ -6271,6 +6293,14 @@ if KIVY_AVAILABLE:
                                 fallback_opts["outtmpl"] = str(target_dir / "%(title).180s.%(ext)s")
                                 with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
                                     info = ydl_fb.extract_info(item_url, download=True)
+                            elif "ffmpeg" in err_str.lower() or "postprocessing" in err_str.lower():
+                                print(f"[Download] FFmpeg merger notice: {err_str}. Retrying with direct high-quality stream...")
+                                fallback_opts = dict(item_opts)
+                                fallback_opts["format"] = "best[height<=1080][vcodec!=none][acodec!=none]/best[height<=720][vcodec!=none][acodec!=none]/22/best[vcodec!=none][acodec!=none]/18/best"
+                                fallback_opts.pop("allow_unplayable_formats", None)
+                                fallback_opts.pop("ffmpeg_location", None)
+                                with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
+                                    info = ydl_fb.extract_info(item_url, download=True)
                             elif total_count > 1:
                                 print(f"[Queue] Skipping item #{idx} ({raw_item_title}) due to: {dl_err}")
                                 skipped_count += 1
@@ -6300,20 +6330,31 @@ if KIVY_AVAILABLE:
                                     if fp and Path(fp).is_file():
                                         cand_files.append(Path(fp))
 
-                            if len(cand_files) < 2 and "requested_formats" in info:
+                            if "requested_formats" in info and info["requested_formats"]:
                                 for rf in info["requested_formats"]:
-                                    fid = rf.get("format_id")
-                                    if fid:
-                                        for cp in target_dir.glob(f"*.f{fid}.*"):
-                                            if cp.is_file() and cp not in cand_files:
-                                                cand_files.append(cp)
+                                    fp = rf.get("filepath")
+                                    if not fp:
+                                        fid = rf.get("format_id")
+                                        if fid:
+                                            for cp in target_dir.glob(f"*.f{fid}.*"):
+                                                if cp.is_file():
+                                                    fp = str(cp)
+                                                    break
+                                    if fp and Path(fp).is_file() and Path(fp) not in cand_files:
+                                        cand_files.append(Path(fp))
+                                    if fp and Path(fp).is_file():
+                                        if rf.get("vcodec") and rf.get("vcodec") != "none" and not v_track:
+                                            v_track = Path(fp)
+                                        elif rf.get("acodec") and rf.get("acodec") != "none" and not a_track:
+                                            a_track = Path(fp)
 
-                            for cp in cand_files:
-                                suf = cp.suffix.lower()
-                                if suf in (".mp4", ".mkv", ".webm") and not v_track:
-                                    v_track = cp
-                                elif suf in (".m4a", ".aac", ".mp3", ".webm", ".opus") and not a_track:
-                                    a_track = cp
+                            if not v_track or not a_track:
+                                for cp in cand_files:
+                                    suf = cp.suffix.lower()
+                                    if suf in (".mp4", ".mkv", ".webm") and not v_track:
+                                        v_track = cp
+                                    elif suf in (".m4a", ".aac", ".mp3", ".webm", ".opus") and not a_track:
+                                        a_track = cp
 
                             if v_track and a_track and v_track.is_file() and a_track.is_file():
                                 final_mp4 = target_dir / (f"[{idx:02d}] {clean_title}.mp4" if total_count > 1 else f"{clean_title}.mp4")
@@ -6504,6 +6545,8 @@ if KIVY_AVAILABLE:
                         user_friendly_err = "Network error. Check internet connection."
                     elif "ExtractorError" in err_msg or "not a valid URL" in err_msg:
                         user_friendly_err = "Invalid URL or platform link. Please check."
+                    elif "ffmpeg" in err_msg.lower():
+                        user_friendly_err = "FFmpeg merger unavailable. Please choose another quality option."
                     else:
                         clean_err = err_msg.replace("ERROR: ", "").strip()
                         user_friendly_err = clean_err if clean_err else "Download failed."

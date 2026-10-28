@@ -290,11 +290,21 @@ def test_get_ydl_format_selector_video_qualities():
     assert "18" in sel_360
 
 
-def test_find_ffmpeg_binary():
+def test_find_ffmpeg_binary(tmp_path):
     from mobile_app import find_ffmpeg_binary
-    # In any environment, should return string path or None without crashing
+    from unittest.mock import patch
+    import os
+
+    # In current environment
     res = find_ffmpeg_binary()
     assert res is None or isinstance(res, str)
+
+    # When candidate is a directory (e.g. python-for-android recipe folder), must NOT return it
+    fake_dir = tmp_path / "ffmpeg"
+    fake_dir.mkdir()
+    with patch("shutil.which", return_value=None), patch.dict(os.environ, {"ANDROID_PRIVATE": str(tmp_path)}):
+        result = find_ffmpeg_binary()
+        assert result is None, f"find_ffmpeg_binary should reject directory, got: {result}"
 
 
 def test_mux_video_audio_android_safety(tmp_path):
