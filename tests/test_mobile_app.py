@@ -304,6 +304,13 @@ def test_start_download_chosen_format_options():
             assert "bestvideo" in sel or "18" in sel
 
 
+def test_is_running_on_android_detection():
+    from mobile_app import is_running_on_android
+    with patch("kivy.utils.platform", "android"):
+        assert is_running_on_android() is True
+
+
+
 
 
 

@@ -441,6 +441,12 @@ def request_android_permissions():
 
 def is_running_on_android() -> bool:
     """Detect if running inside an Android runtime environment."""
+    try:
+        from kivy.utils import platform
+        if platform == "android":
+            return True
+    except Exception:
+        pass
     return (
         "ANDROID_ARGUMENT" in os.environ
         or "ANDROID_ROOT" in os.environ
@@ -629,7 +635,8 @@ def mux_video_audio_android(video_path: Path, audio_path: Path, output_path: Pat
     """
     Natively merge separate video (H.264/MP4) and audio (AAC/M4A) streams into a single MP4
     container using Android's native android.media.MediaMuxer & MediaExtractor APIs via PyJnius.
-    Falls back to system FFmpeg if available on non-Android platforms.
+    Ensures chronological presentation timestamp (PTS) interleaving across tracks as strictly
+    mandated by Android MediaMuxer. Falls back to system FFmpeg if available on non-Android platforms.
     """
     if not video_path.exists() or not audio_path.exists():
         print(f"[MediaMuxer] Input file missing: v={video_path.exists()}, a={audio_path.exists()}")
@@ -637,40 +644,71 @@ def mux_video_audio_android(video_path: Path, audio_path: Path, output_path: Pat
 
     # Attempt native Android MediaMuxer via PyJnius
     if is_running_on_android():
+        v_fis = None
+        a_fis = None
+        fos = None
+        muxer = None
+        v_extractor = None
+        a_extractor = None
         try:
             from jnius import autoclass
             MediaExtractor = autoclass("android.media.MediaExtractor")
             MediaMuxer = autoclass("android.media.MediaMuxer")
             MediaCodec_BufferInfo = autoclass("android.media.MediaCodec$BufferInfo")
             ByteBuffer = autoclass("java.nio.ByteBuffer")
+            FileInputStream = autoclass("java.io.FileInputStream")
+            FileOutputStream = autoclass("java.io.FileOutputStream")
+            File = autoclass("java.io.File")
 
+            # 1. Open video extractor via FileDescriptor (bypasses Scoped Storage / Stagefright path limits)
+            v_file = File(str(video_path.resolve()))
+            v_fis = FileInputStream(v_file)
             v_extractor = MediaExtractor()
-            v_extractor.setDataSource(str(video_path.resolve()))
+            v_extractor.setDataSource(v_fis.getFD(), 0, v_file.length())
 
+            # 2. Open audio extractor via FileDescriptor
+            a_file = File(str(audio_path.resolve()))
+            a_fis = FileInputStream(a_file)
             a_extractor = MediaExtractor()
-            a_extractor.setDataSource(str(audio_path.resolve()))
+            a_extractor.setDataSource(a_fis.getFD(), 0, a_file.length())
 
             tmp_output = output_path
             if tmp_output.resolve() in (video_path.resolve(), audio_path.resolve()):
                 tmp_output = output_path.with_name(f"merged_{output_path.name}")
 
-            muxer = MediaMuxer(str(tmp_output.resolve()), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            out_file = File(str(tmp_output.resolve()))
+            if out_file.exists():
+                out_file.delete()
+            fos = FileOutputStream(out_file)
 
-            # 1. Select Video Track
+            try:
+                muxer = MediaMuxer(fos.getFD(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            except Exception:
+                muxer = MediaMuxer(str(tmp_output.resolve()), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+
+            # 3. Select and add Video Track
             video_track_idx = -1
             for i in range(v_extractor.getTrackCount()):
                 format_obj = v_extractor.getTrackFormat(i)
-                mime = format_obj.getString("mime")
+                mime = None
+                try:
+                    mime = format_obj.getString("mime")
+                except Exception:
+                    pass
                 if mime and mime.startswith("video/"):
                     v_extractor.selectTrack(i)
                     video_track_idx = muxer.addTrack(format_obj)
                     break
 
-            # 2. Select Audio Track
+            # 4. Select and add Audio Track
             audio_track_idx = -1
             for i in range(a_extractor.getTrackCount()):
                 format_obj = a_extractor.getTrackFormat(i)
-                mime = format_obj.getString("mime")
+                mime = None
+                try:
+                    mime = format_obj.getString("mime")
+                except Exception:
+                    pass
                 if mime and mime.startswith("audio/"):
                     a_extractor.selectTrack(i)
                     audio_track_idx = muxer.addTrack(format_obj)
@@ -678,58 +716,85 @@ def mux_video_audio_android(video_path: Path, audio_path: Path, output_path: Pat
 
             if video_track_idx < 0 or audio_track_idx < 0:
                 print(f"[MediaMuxer] Track error: video={video_track_idx}, audio={audio_track_idx}")
-                try:
-                    muxer.release()
-                except Exception:
-                    pass
-                v_extractor.release()
-                a_extractor.release()
                 return False
 
             muxer.start()
 
-            buf_size = 1024 * 1024  # 1MB buffer
-            buf = ByteBuffer.allocate(buf_size)
+            # 5. Allocate 4MB direct ByteBuffer for high-bitrate keyframes
+            buf_size = 4 * 1024 * 1024
+            buf = ByteBuffer.allocateDirect(buf_size)
             buffer_info = MediaCodec_BufferInfo()
 
-            # Copy video track samples
+            # 6. Interleaved sample writing across tracks by presentation timestamp (PTS)
             while True:
-                sample_size = v_extractor.readSampleData(buf, 0)
-                if sample_size < 0:
-                    break
-                buffer_info.offset = 0
-                buffer_info.size = sample_size
-                buffer_info.presentationTimeUs = v_extractor.getSampleTime()
-                buffer_info.flags = v_extractor.getSampleFlags()
-                muxer.writeSampleData(video_track_idx, buf, buffer_info)
-                v_extractor.advance()
+                v_time = v_extractor.getSampleTime()
+                a_time = a_extractor.getSampleTime()
 
-            # Copy audio track samples
-            while True:
-                sample_size = a_extractor.readSampleData(buf, 0)
-                if sample_size < 0:
+                if v_time < 0 and a_time < 0:
                     break
-                buffer_info.offset = 0
-                buffer_info.size = sample_size
-                buffer_info.presentationTimeUs = a_extractor.getSampleTime()
-                buffer_info.flags = a_extractor.getSampleFlags()
-                muxer.writeSampleData(audio_track_idx, buf, buffer_info)
-                a_extractor.advance()
 
-            muxer.stop()
-            muxer.release()
-            v_extractor.release()
-            a_extractor.release()
+                if v_time >= 0 and (a_time < 0 or v_time <= a_time):
+                    buf.clear()
+                    sample_size = v_extractor.readSampleData(buf, 0)
+                    if sample_size > 0:
+                        buffer_info.set(0, sample_size, v_time, v_extractor.getSampleFlags())
+                        muxer.writeSampleData(video_track_idx, buf, buffer_info)
+                    v_extractor.advance()
+                elif a_time >= 0:
+                    buf.clear()
+                    sample_size = a_extractor.readSampleData(buf, 0)
+                    if sample_size > 0:
+                        buffer_info.set(0, sample_size, a_time, a_extractor.getSampleFlags())
+                        muxer.writeSampleData(audio_track_idx, buf, buffer_info)
+                    a_extractor.advance()
+
+            try:
+                muxer.stop()
+            except Exception as se:
+                print(f"[MediaMuxer] muxer.stop note: {se}")
 
             if tmp_output != output_path:
                 if output_path.exists():
                     output_path.unlink()
                 tmp_output.rename(output_path)
 
-            print(f"[MediaMuxer] Android native mux successful -> {output_path.name}")
-            return True
+            if output_path.exists() and output_path.stat().st_size > 1024:
+                print(f"[MediaMuxer] Android native mux successful -> {output_path.name} ({output_path.stat().st_size} bytes)")
+                return True
+            return False
         except Exception as e:
             print(f"[MediaMuxer] Native Android muxing notice: {e}")
+        finally:
+            if muxer:
+                try:
+                    muxer.release()
+                except Exception:
+                    pass
+            if v_extractor:
+                try:
+                    v_extractor.release()
+                except Exception:
+                    pass
+            if a_extractor:
+                try:
+                    a_extractor.release()
+                except Exception:
+                    pass
+            if v_fis:
+                try:
+                    v_fis.close()
+                except Exception:
+                    pass
+            if a_fis:
+                try:
+                    a_fis.close()
+                except Exception:
+                    pass
+            if fos:
+                try:
+                    fos.close()
+                except Exception:
+                    pass
 
     # Fallback: system FFmpeg if available
     ffmpeg_bin = shutil.which("ffmpeg")
@@ -6147,7 +6212,7 @@ if KIVY_AVAILABLE:
                             if v_track and a_track and v_track.is_file() and a_track.is_file():
                                 final_mp4 = target_dir / (f"[{idx:02d}] {clean_title}.mp4" if total_count > 1 else f"{clean_title}.mp4")
                                 merged_ok = mux_video_audio_android(v_track, a_track, final_mp4)
-                                if merged_ok and final_mp4.is_file():
+                                if merged_ok and final_mp4.is_file() and final_mp4.stat().st_size > 1024:
                                     saved_path = final_mp4
                                     try:
                                         v_track.unlink(missing_ok=True)
@@ -6155,7 +6220,64 @@ if KIVY_AVAILABLE:
                                     except Exception:
                                         pass
                                 else:
-                                    saved_path = v_track
+                                    print("[Mux] DASH muxing did not produce valid MP4. Falling back to guaranteed stream with audio...")
+                                    try:
+                                        v_track.unlink(missing_ok=True)
+                                        a_track.unlink(missing_ok=True)
+                                        if final_mp4.exists():
+                                            final_mp4.unlink(missing_ok=True)
+                                    except Exception:
+                                        pass
+
+                                    # Guaranteed fallback: fetch stream with synchronized audio
+                                    fb_opts = dict(item_opts)
+                                    fb_opts["format"] = "22/best[height<=720][vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]/18/best"
+                                    fb_opts.pop("allow_unplayable_formats", None)
+                                    fb_opts["extractor_args"] = {"youtube": {"player_client": ["android", "web"]}}
+                                    try:
+                                        with yt_dlp.YoutubeDL(fb_opts) as ydl_fb:
+                                            fb_info = ydl_fb.extract_info(item_url, download=True)
+                                            if fb_info:
+                                                if "requested_downloads" in fb_info and fb_info["requested_downloads"]:
+                                                    fb_fp = fb_info["requested_downloads"][0].get("filepath")
+                                                    if fb_fp and Path(fb_fp).is_file():
+                                                        saved_path = Path(fb_fp)
+                                                if not saved_path:
+                                                    try:
+                                                        fb_prep = ydl_fb.prepare_filename(fb_info)
+                                                        if Path(fb_prep).is_file():
+                                                            saved_path = Path(fb_prep)
+                                                    except Exception:
+                                                        pass
+                                    except Exception as fb_err:
+                                        print(f"[Mux Fallback] Notice: {fb_err}")
+                            elif v_track and not a_track:
+                                print("[Download] Only silent video track found. Re-downloading with guaranteed audio stream...")
+                                try:
+                                    v_track.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+                                fb_opts = dict(item_opts)
+                                fb_opts["format"] = "22/best[height<=720][vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]/18/best"
+                                fb_opts.pop("allow_unplayable_formats", None)
+                                fb_opts["extractor_args"] = {"youtube": {"player_client": ["android", "web"]}}
+                                try:
+                                    with yt_dlp.YoutubeDL(fb_opts) as ydl_fb:
+                                        fb_info = ydl_fb.extract_info(item_url, download=True)
+                                        if fb_info:
+                                            if "requested_downloads" in fb_info and fb_info["requested_downloads"]:
+                                                fb_fp = fb_info["requested_downloads"][0].get("filepath")
+                                                if fb_fp and Path(fb_fp).is_file():
+                                                    saved_path = Path(fb_fp)
+                                            if not saved_path:
+                                                try:
+                                                    fb_prep = ydl_fb.prepare_filename(fb_info)
+                                                    if Path(fb_prep).is_file():
+                                                        saved_path = Path(fb_prep)
+                                                except Exception:
+                                                    pass
+                                except Exception as fb_err:
+                                    print(f"[Fallback] Notice: {fb_err}")
 
                         if not saved_path and "requested_downloads" in info and info["requested_downloads"]:
                             fp = info["requested_downloads"][0].get("filepath")
