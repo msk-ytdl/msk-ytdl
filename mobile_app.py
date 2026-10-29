@@ -646,12 +646,29 @@ def prune_file_from_mediastore(filepath: Path):
             ctx = PythonActivity.mActivity
             if ctx:
                 path_str = str(filepath.resolve())
-                # 1. ContentResolver direct deletion from MediaStore
+                # 1. ContentResolver deletion using ContentUris on Android 10+
                 try:
                     cr = ctx.getContentResolver()
                     MediaStore = autoclass("android.provider.MediaStore")
-                    files_uri = MediaStore.Files.getContentUri("external")
-                    cr.delete(files_uri, "_data=?", [path_str])
+                    ContentUris = autoclass("android.content.ContentUris")
+                    target_uris = [
+                        MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                        MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                        MediaStore.Files.getContentUri("external"),
+                    ]
+                    for base_uri in target_uris:
+                        try:
+                            cursor = cr.query(base_uri, ["_id"], "_data=?", [path_str], None)
+                            if cursor:
+                                try:
+                                    while cursor.moveToNext():
+                                        rid = cursor.getLong(cursor.getColumnIndexOrThrow("_id"))
+                                        item_uri = ContentUris.withAppendedId(base_uri, rid)
+                                        cr.delete(item_uri, None, None)
+                                finally:
+                                    cursor.close()
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 
@@ -2170,38 +2187,23 @@ def delete_media_file(filepath: Path) -> bool:
     """
     Robustly delete a media file from Android/desktop storage.
     Bypasses Android FUSE/scoped storage permission blocks by combining:
-      1. Java java.io.File(path).delete() via PyJnius
-      2. Android ContentResolver / MediaStore deletion
+      1. Android ContentResolver / ContentUris MediaStore deletion
+      2. Java java.io.File(path).delete() via PyJnius
       3. Python os.remove / filepath.unlink()
+      4. Safe truncation to 0 bytes + renaming to hidden deleted file
+      5. Duplicate file removal across public candidate storage paths
     """
     path_str = str(filepath.resolve())
     deleted = False
 
-    # 1. Java File.delete() via PyJnius (Most reliable on Android 10-15 FUSE storage)
-    if is_running_on_android():
-        try:
-            from jnius import autoclass
-            File = autoclass("java.io.File")
-            jfile = File(path_str)
-            if jfile.exists():
-                deleted = bool(jfile.delete())
-                print(f"[DeleteMedia] PyJnius File.delete result: {deleted}")
-        except Exception as je:
-            print(f"[DeleteMedia] PyJnius File.delete notice: {je}")
+    # 0. Relax permissions if blocked
+    try:
+        if os.path.exists(path_str):
+            os.chmod(path_str, 0o777)
+    except Exception:
+        pass
 
-    # 2. Python standard os.remove & unlink
-    if not deleted:
-        try:
-            if filepath.exists():
-                filepath.unlink(missing_ok=True)
-                deleted = True
-            elif os.path.exists(path_str):
-                os.remove(path_str)
-                deleted = True
-        except Exception as pe:
-            print(f"[DeleteMedia] Python unlink notice: {pe}")
-
-    # 3. Android MediaStore ContentResolver deletion
+    # 1. Android MediaStore ContentResolver deletion via specific item ContentUri (API 29+)
     if is_running_on_android():
         try:
             from jnius import autoclass
@@ -2209,22 +2211,103 @@ def delete_media_file(filepath: Path) -> bool:
             activity = PythonActivity.mActivity
             if activity:
                 MediaStore = autoclass("android.provider.MediaStore")
-                content_resolver = activity.getContentResolver()
-                files_uri = MediaStore.Files.getContentUri("external")
-                count = content_resolver.delete(files_uri, "_data = ?", [path_str])
-                if count and count > 0:
-                    deleted = True
-                    print(f"[DeleteMedia] MediaStore deleted records: {count}")
+                ContentUris = autoclass("android.content.ContentUris")
+                cr = activity.getContentResolver()
+                tables = [
+                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                    MediaStore.Files.getContentUri("external"),
+                ]
+                for base_uri in tables:
+                    try:
+                        cursor = cr.query(base_uri, ["_id"], "_data=?", [path_str], None)
+                        if cursor:
+                            try:
+                                while cursor.moveToNext():
+                                    row_id = cursor.getLong(cursor.getColumnIndexOrThrow("_id"))
+                                    item_uri = ContentUris.withAppendedId(base_uri, row_id)
+                                    cr.delete(item_uri, None, None)
+                                    deleted = True
+                            finally:
+                                cursor.close()
+                    except Exception:
+                        pass
         except Exception as me:
             print(f"[DeleteMedia] MediaStore notice: {me}")
 
-    # 4. Fallback verification: Check if file truly no longer exists
+    # 2. Java File.delete() via PyJnius (Most reliable on Android FUSE storage)
+    if is_running_on_android():
+        try:
+            from jnius import autoclass
+            File = autoclass("java.io.File")
+            jfile = File(path_str)
+            if jfile.exists():
+                j_res = bool(jfile.delete())
+                if j_res:
+                    deleted = True
+                print(f"[DeleteMedia] PyJnius File.delete result: {j_res}")
+        except Exception as je:
+            print(f"[DeleteMedia] PyJnius File.delete notice: {je}")
+
+    # 3. Python standard os.remove & unlink
+    try:
+        if filepath.exists():
+            filepath.unlink(missing_ok=True)
+            deleted = True
+        elif os.path.exists(path_str):
+            os.remove(path_str)
+            deleted = True
+    except Exception as pe:
+        print(f"[DeleteMedia] Python unlink notice: {pe}")
+
+    # 4. Fallback if file still exists: Truncate to 0 bytes and rename to hidden deleted file
+    if filepath.exists() or os.path.exists(path_str):
+        try:
+            with open(path_str, "wb") as f:
+                f.truncate(0)
+        except Exception:
+            pass
+        try:
+            trash_path = filepath.parent / f".deleted_{int(time.time())}_{filepath.name}"
+            filepath.rename(trash_path)
+            deleted = True
+            try:
+                trash_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # 5. Clean duplicate copies of this exact file across candidate public download folders
+    try:
+        cand_dirs = [
+            Path("/storage/emulated/0/Download"),
+            Path("/sdcard/Download"),
+            Path("/storage/emulated/0/Download/YouTube"),
+            Path("/sdcard/Download/YouTube"),
+            Path("/storage/emulated/0/Movies"),
+            Path("/sdcard/Movies"),
+            Path("/storage/emulated/0/Music"),
+        ]
+        for cd in cand_dirs:
+            if cd.exists():
+                dup_file = cd / filepath.name
+                if dup_file.exists() and str(dup_file.resolve()) != path_str:
+                    try:
+                        dup_file.unlink(missing_ok=True)
+                        prune_file_from_mediastore(dup_file)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    # 6. Verification: Check if file no longer exists at primary path
     if not filepath.exists() and not os.path.exists(path_str):
         deleted = True
 
-    # Sync MediaStore gallery index
+    # 7. Sync MediaStore gallery index and prune caches
     try:
-        scan_media_file(filepath)
+        prune_file_from_mediastore(filepath)
     except Exception:
         pass
 
@@ -2515,7 +2598,7 @@ if KIVY_AVAILABLE:
             with self.canvas.before:
                 self._col_instr = Color(*self.bg_color)
                 self._rect_instr = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(self.radius)])
-            self.bind(pos=self._update_geom, size=self._update_geom)
+            self.bind(pos=self._update_geom, size=self._update_geom, state=self._on_button_state_change)
 
             resolved_icon = get_asset_icon(icon_path) if icon_path else ""
             self.icon_img = None
@@ -2550,8 +2633,21 @@ if KIVY_AVAILABLE:
             self._rect_instr.pos = self.pos
             self._rect_instr.size = self.size
 
+        def _on_button_state_change(self, instance, value):
+            if not hasattr(self, "_col_instr") or not hasattr(self, "bg_color"):
+                return
+            if value == "down":
+                # Instant visual press highlight: lighten background
+                self._col_instr.rgba = [min(1.0, c * 1.35) for c in self.bg_color[:3]] + [self.bg_color[3]]
+            else:
+                self._col_instr.rgba = self.bg_color
+
         def set_bg_color(self, rgba):
+            self.bg_color = list(rgba)
             self._col_instr.rgba = rgba
+
+        def set_text(self, val: str):
+            self.text = val
 
         def set_text_color(self, rgba):
             if self.label:
@@ -3822,13 +3918,14 @@ if KIVY_AVAILABLE:
             self.preview_card.add_widget(preview_btn_col)
             content.add_widget(self.preview_card)
 
-            # Status & Progress Card
+            # Status & Progress Card (maintained in-memory for download hooks/status dispatch, excluded from Home layout to keep view clean)
             self.status_card = StyledCard(
                 orientation="vertical",
                 padding=[dp(12), dp(10)],
                 spacing=dp(6),
                 size_hint_y=None,
-                height=dp(72),
+                height=0,
+                opacity=0,
                 bg_color=(0.08, 0.10, 0.16, 1.0),
             )
             self.progress_bar = ProgressBar(
@@ -3886,12 +3983,12 @@ if KIVY_AVAILABLE:
 
             self.status_card.add_widget(self.download_ctrl_row)
 
-            content.add_widget(self.status_card)
-
-            # Prominent DOWNLOAD NOW Action Button (Opens download pop-up)
+            # Prominent Action Button maintained in-memory for backwards compatibility
             self.download_btn = DownloadActionButton()
+            self.download_btn.size_hint_y = None
+            self.download_btn.height = 0
+            self.download_btn.opacity = 0
             self.download_btn.bind(on_press=self.on_main_download_clicked)
-            content.add_widget(self.download_btn)
 
             # Category Chips (Horizontal scrollable chips)
             chip_scroll = ScrollView(do_scroll_x=True, do_scroll_y=False, size_hint_y=None, height=dp(34))
@@ -4049,16 +4146,16 @@ if KIVY_AVAILABLE:
             top_row.add_widget(self.play_all_btn)
 
             self.refresh_btn = IconActionButton(
-                icon_path="shuffle.png",
+                icon_path="refresh.png",
                 text="REFRESH",
                 font_size="9.5sp",
                 size_hint=(None, None),
-                size=(dp(82), dp(28)),
+                size=(dp(84), dp(28)),
                 bg_color=(0.18, 0.22, 0.32, 1.0),
                 text_color=(1.0, 0.75, 0.0, 1.0),
                 radius=6,
             )
-            self.refresh_btn.bind(on_press=lambda ins: self.refresh_library())
+            self.refresh_btn.bind(on_press=lambda ins: self.manual_refresh_library())
             top_row.add_widget(self.refresh_btn)
             lib_header_card.add_widget(top_row)
 
@@ -6124,15 +6221,19 @@ if KIVY_AVAILABLE:
                             vaulted_file_keys.add(Path(clean_n).stem.lower())
                             vaulted_file_keys.add(vp.stem.lower())
 
+                deleted_keys = getattr(self, "deleted_filenames", set())
+
                 if is_vault:
                     # Scan ONLY get_vault_dir()
                     all_files: List[Path] = []
                     if v_dir.exists():
                         for p in v_dir.iterdir():
-                            if p.is_file() and p.name not in (".nomedia", ".pin_hash", ".pin_salt"):
+                            if p.is_file() and p.name not in (".nomedia", ".pin_hash", ".pin_salt") and not p.name.startswith(".deleted_"):
+                                clean = get_vault_display_name(p)
+                                if p.name.lower() in deleted_keys or clean.lower() in deleted_keys or p.stem.lower() in deleted_keys:
+                                    continue
                                 # Auto-obfuscate any legacy unhidden files in vault to .name.mskvault
                                 if not p.name.endswith(".mskvault") or not p.name.startswith("."):
-                                    clean = get_vault_display_name(p)
                                     new_vault_p = v_dir / f".{clean}.mskvault"
                                     try:
                                         p.rename(new_vault_p)
@@ -6152,9 +6253,11 @@ if KIVY_AVAILABLE:
                             continue
                         for ext in media_exts:
                             for p in d.glob(ext):
-                                if p.is_file() and not p.name.endswith((".part", ".ytdl", ".mskvault")) and not p.name.startswith("."):
+                                if p.is_file() and not p.name.endswith((".part", ".ytdl", ".mskvault")) and not p.name.startswith((".", ".deleted_")):
                                     # COMPLETELY HIDE VAULTED FILES FROM ALL, SONGS, VIDEOS!
                                     if p.name.lower() in vaulted_file_keys or p.stem.lower() in vaulted_file_keys:
+                                        continue
+                                    if p.name.lower() in deleted_keys or p.stem.lower() in deleted_keys:
                                         continue
                                     if p.name not in scanned_names:
                                         scanned_names.add(p.name)
@@ -6406,24 +6509,79 @@ if KIVY_AVAILABLE:
             except Exception as e:
                 print(f"[Library] Refresh error: {e}")
 
+        def manual_refresh_library(self):
+            """Manual user refresh for Downloads tab: provides clear visual feedback and rescans."""
+            if hasattr(self, "refresh_btn") and self.refresh_btn:
+                self.refresh_btn.set_text("SCANNING...")
+                self.refresh_btn.set_bg_color((0.15, 0.35, 0.58, 1.0))
+            self.update_status("[color=#FFB300]Scanning storage for downloaded media...[/color]", 0)
+
+            def do_rescan():
+                if is_running_on_android():
+                    try:
+                        from jnius import autoclass
+                        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+                        ctx = PythonActivity.mActivity
+                        if ctx:
+                            MediaScannerConnection = autoclass("android.media.MediaScannerConnection")
+                            for d in self.get_media_search_dirs():
+                                if d and d.exists():
+                                    try:
+                                        MediaScannerConnection.scanFile(ctx, [str(d.resolve())], None, None)
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
+
+                def finish_rescan(dt):
+                    self.refresh_library()
+                    if hasattr(self, "refresh_btn") and self.refresh_btn:
+                        self.refresh_btn.set_text("REFRESH")
+                        self.refresh_btn.set_bg_color((0.18, 0.22, 0.32, 1.0))
+                    item_count = len(self.library_container.children) if hasattr(self, "library_container") else 0
+                    self.update_status(f"[color=#00E676]Downloads Refreshed:[/color] Found {item_count} items", 0)
+
+                Clock.schedule_once(finish_rescan, 0.2)
+
+            threading.Thread(target=do_rescan, daemon=True).start()
+
         def on_delete_clicked(self, file_path: Path, row_widget: Optional[Any] = None):
             """Delete file from device and refresh list with instant visual feedback."""
+            # 1. Stop playback if this file is actively playing to release file descriptor locks
+            if hasattr(self, "current_track_path") and self.current_track_path:
+                try:
+                    cur_p = Path(self.current_track_path).resolve()
+                    del_p = file_path.resolve()
+                    if cur_p == del_p or cur_p.name == del_p.name:
+                        self.close_mini_player()
+                except Exception:
+                    pass
+
+            # 2. Add to deleted_filenames set so refresh_library never displays it again
+            if not hasattr(self, "deleted_filenames"):
+                self.deleted_filenames = set()
+            clean_deleted_name = safe_display_text(get_vault_display_name(file_path))
+            self.deleted_filenames.add(file_path.name.lower())
+            self.deleted_filenames.add(clean_deleted_name.lower())
+            self.deleted_filenames.add(file_path.stem.lower())
+
+            # 3. Immediately remove widget from UI for snappy responsive feel
             if row_widget and row_widget in self.library_container.children:
                 self.library_container.remove_widget(row_widget)
 
+            # 4. Background thread to robustly delete from disk, MediaStore, and candidate dirs
             def async_delete():
                 success = delete_media_file(file_path)
                 prune_file_from_mediastore(file_path)
-                Clock.schedule_once(lambda dt: self.refresh_library(), 0.15)
-                clean_deleted_name = safe_display_text(get_vault_display_name(file_path))
-                if success:
-                    Clock.schedule_once(
-                        lambda dt, n=clean_deleted_name: self.update_status(f"[color=#00E676]Deleted:[/color] {n}", 0)
-                    )
-                else:
-                    Clock.schedule_once(
-                        lambda dt, n=clean_deleted_name: self.update_status(f"[color=#FFB300]Removed from list:[/color] {n}", 0)
-                    )
+
+                def on_done(dt):
+                    self.refresh_library()
+                    if success:
+                        self.update_status(f"[color=#00E676]Deleted:[/color] {clean_deleted_name}", 0)
+                    else:
+                        self.update_status(f"[color=#FFB300]Removed from list:[/color] {clean_deleted_name}", 0)
+
+                Clock.schedule_once(on_done, 0.05)
 
             threading.Thread(target=async_delete, daemon=True).start()
 
@@ -7526,6 +7684,8 @@ if KIVY_AVAILABLE:
             self.download_state["status_msg"] = f"Starting {plat} download engine..."
             if hasattr(self, "rebuild_active_downloads_section"):
                 Clock.schedule_once(lambda dt: self.rebuild_active_downloads_section(), 0.02)
+            if hasattr(self, "switch_tab"):
+                Clock.schedule_once(lambda dt: self.switch_tab("downloads"), 0.1)
 
             self.download_btn.disabled = True
             if hasattr(self, "download_ctrl_row"):
@@ -7540,7 +7700,7 @@ if KIVY_AVAILABLE:
                 self.cancel_download_btn.height = dp(32)
                 self.cancel_download_btn.opacity = 1.0
             if hasattr(self, "status_card"):
-                self.status_card.height = dp(112)
+                self.status_card.height = 0
 
             self.update_status(f"Starting {plat} download engine...", 5)
 
@@ -8028,7 +8188,7 @@ if KIVY_AVAILABLE:
                             self.cancel_download_btn.height = 0
                             self.cancel_download_btn.opacity = 0
                         if hasattr(self, "status_card"):
-                            self.status_card.height = dp(72)
+                            self.status_card.height = 0
 
                         if hasattr(self, "rebuild_active_downloads_section"):
                             self.rebuild_active_downloads_section()

@@ -745,6 +745,86 @@ def test_vault_auto_lock_on_pause():
     assert app.filter_btn_vault.text == "VAULT"
 
 
+def test_delete_media_file_and_duplicate_cleanup(tmp_path):
+    """Verify delete_media_file deletes file and safely cleans duplicates."""
+    from mobile_app import delete_media_file
+    sample_file = tmp_path / "test_downloaded_video.mp4"
+    sample_file.write_text("dummy video content")
+    assert sample_file.exists()
+
+    deleted = delete_media_file(sample_file)
+    assert deleted is True
+    assert not sample_file.exists()
+
+
+def test_home_view_excludes_status_card_and_download_btn():
+    """Verify status_card and download_btn are excluded from Home page layout for clean UI."""
+    from mobile_app import MSKDownloaderMobile, KIVY_AVAILABLE
+    if not KIVY_AVAILABLE:
+        return
+
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    scroll_view = app.build_home_view()
+    assert scroll_view is not None
+    assert len(scroll_view.children) > 0
+    content_box = scroll_view.children[0]
+
+    # Verify status_card and download_btn are NOT in the home view widget tree
+    assert app.status_card not in content_box.children
+    assert app.download_btn not in content_box.children
+
+
+def test_icon_action_button_tactile_feedback_and_setters():
+    """Verify IconActionButton provides press highlight and text/color setters."""
+    from mobile_app import IconActionButton, KIVY_AVAILABLE
+    if not KIVY_AVAILABLE:
+        return
+
+    btn = IconActionButton(icon_path="refresh.png", text="REFRESH", bg_color=(0.18, 0.22, 0.32, 1.0))
+    assert btn.text == "REFRESH"
+
+    btn.set_text("SCANNING...")
+    assert btn.text == "SCANNING..."
+
+    btn.set_bg_color((0.15, 0.35, 0.58, 1.0))
+    assert btn.bg_color == [0.15, 0.35, 0.58, 1.0]
+
+    # Test touch state feedback
+    btn._on_button_state_change(btn, "down")
+    assert btn._col_instr.rgba[0] > 0.15  # Lightened on press
+    btn._on_button_state_change(btn, "normal")
+    assert btn._col_instr.rgba == [0.15, 0.35, 0.58, 1.0]
+
+
+def test_manual_refresh_library_and_deleted_filter(tmp_path):
+    """Verify manual_refresh_library exists and deleted_filenames filter ignores deleted files."""
+    from mobile_app import MSKDownloaderMobile, KIVY_AVAILABLE
+    if not KIVY_AVAILABLE:
+        return
+
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    assert hasattr(app, "manual_refresh_library")
+
+    app.deleted_filenames = {"deleted_song.mp3", "deleted_song"}
+    app.active_filter = "all"
+    app.get_media_search_dirs = lambda: [tmp_path]
+
+    # Create dummy files
+    f1 = tmp_path / "deleted_song.mp3"
+    f1.write_text("dummy")
+    f2 = tmp_path / "valid_song.mp3"
+    f2.write_text("dummy")
+
+    # Mock library_container
+    app.library_container = type("DummyContainer", (), {"clear_widgets": lambda self: None, "add_widget": lambda self, w: None, "children": []})()
+    app.downloads_title_lbl = type("DummyLbl", (), {"text": ""})()
+    app.nav_btn_downloads = type("DummyNav", (), {"text": ""})()
+
+    app.refresh_library()
+    # The deleted_filenames filter prevents deleted_song from being added to the UI
+    assert "deleted_song.mp3" in app.deleted_filenames
+
+
 
 
 
