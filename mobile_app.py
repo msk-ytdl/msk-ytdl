@@ -728,25 +728,23 @@ def is_vault_path(p: Path) -> bool:
 def prepare_vault_file_for_playback(vault_file: Path) -> Path:
     """
     Prepare vaulted file (.video.mp4.mskvault) for smooth playback in video/audio engines
-    by linking or copying into app's private sandbox cache (/data/user/0/.../cache/vault_play/)
-    which is 100% inaccessible to Gallery, File Managers, and external apps.
+    by staging a temporary file in get_vault_dir() / '.play' on external storage.
+    Features:
+      1. Located inside .vault/.play/ with .nomedia so Gallery, Google Photos & File Managers
+         never index it.
+      2. Located on external storage (/storage/emulated/0/Download/.vault/.play/) so Android
+         mediaserver (VideoView & MediaPlayer) has full read access without EACCES permissions.
+      3. Sets permissions 0o777 on the temp file.
+      4. Auto-cleans expired cache files and reuses matching cached files instantly.
     """
     if not vault_file or not vault_file.exists():
         return vault_file
-    if not vault_file.name.endswith(".mskvault"):
+    if not vault_file.name.endswith(".mskvault") and not is_vault_path(vault_file):
         return vault_file
     try:
         clean_name = get_vault_display_name(vault_file)
-        cache_dir = get_android_download_dir() / ".msk_cache" if not is_running_on_android() else Path.home() / ".msk_cache"
-        if is_running_on_android():
-            try:
-                from jnius import autoclass
-                PythonActivity = autoclass("org.kivy.android.PythonActivity")
-                ctx = PythonActivity.mActivity
-                if ctx and ctx.getCacheDir():
-                    cache_dir = Path(ctx.getCacheDir().getAbsolutePath()) / "vault_play"
-            except Exception:
-                pass
+        v_dir = get_vault_dir()
+        cache_dir = v_dir / ".play"
         cache_dir.mkdir(parents=True, exist_ok=True)
         nomedia = cache_dir / ".nomedia"
         if not nomedia.exists():
@@ -754,22 +752,44 @@ def prepare_vault_file_for_playback(vault_file: Path) -> Path:
                 nomedia.touch()
             except Exception:
                 pass
+
         temp_file = cache_dir / clean_name
         if temp_file.exists():
             try:
                 if temp_file.stat().st_size == vault_file.stat().st_size:
+                    try:
+                        os.chmod(str(temp_file), 0o777)
+                    except Exception:
+                        pass
                     return temp_file
-                temp_file.unlink()
+                temp_file.unlink(missing_ok=True)
             except Exception:
                 pass
+
+        shutil.copy2(str(vault_file), str(temp_file))
         try:
-            os.link(str(vault_file), str(temp_file))
+            os.chmod(str(temp_file), 0o777)
         except Exception:
-            shutil.copy2(str(vault_file), str(temp_file))
+            pass
         return temp_file
     except Exception as e:
         print(f"[Vault] Playback cache notice: {e}")
         return vault_file
+
+
+def clean_vault_playback_cache():
+    """Remove temporary staged playback files when vault is locked."""
+    try:
+        p_dir = get_vault_dir() / ".play"
+        if p_dir.exists():
+            for f in p_dir.iterdir():
+                if f.is_file() and f.name != ".nomedia":
+                    try:
+                        f.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
 
 
 def get_vault_pin_hash() -> str:
@@ -802,68 +822,8 @@ def check_vault_pin(entered_pin: str) -> bool:
 
 
 def set_audio_as_ringtone(filepath: Path) -> Tuple[bool, str]:
-    """
-    Save audio track into Android's system Ringtones directory (/sdcard/Ringtones)
-    and broadcast MediaScanner so it instantly appears in Phone Sound Settings / Ringtone picker.
-    Also attempts native RingtoneManager if permissions permit.
-    """
-    if not filepath or not filepath.exists():
-        return False, "File does not exist"
-
-    if is_running_on_android():
-        dest_dirs = [
-            Path("/storage/emulated/0/Ringtones"),
-            Path("/sdcard/Ringtones"),
-            get_android_download_dir() / "Ringtones",
-        ]
-        try:
-            from jnius import autoclass
-            Environment = autoclass("android.os.Environment")
-            ext_r = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_RINGTONES)
-            if ext_r:
-                dest_dirs.insert(0, Path(ext_r.getAbsolutePath()))
-        except Exception:
-            pass
-    else:
-        dest_dirs = [
-            get_android_download_dir() / "Ringtones",
-        ]
-
-    target_file = None
-    for d in dest_dirs:
-        try:
-            d.mkdir(parents=True, exist_ok=True)
-            t = d / filepath.name
-            shutil.copy2(str(filepath), str(t))
-            target_file = t
-            scan_media_file(t)
-            break
-        except Exception:
-            continue
-
-    if is_running_on_android() and target_file:
-        try:
-            from jnius import autoclass
-            PythonActivity = autoclass("org.kivy.android.PythonActivity")
-            RingtoneManager = autoclass("android.media.RingtoneManager")
-            Uri = autoclass("android.net.Uri")
-            File = autoclass("java.io.File")
-            activity = PythonActivity.mActivity
-            if activity:
-                j_file = File(str(target_file.resolve()))
-                j_uri = Uri.fromFile(j_file)
-                RingtoneManager.setActualDefaultRingtoneUri(
-                    activity.getApplicationContext(),
-                    RingtoneManager.TYPE_RINGTONE,
-                    j_uri
-                )
-                return True, f"Ringtone set: {filepath.stem}"
-        except Exception:
-            pass
-
-    if target_file and target_file.exists():
-        return True, f"Saved to Ringtones! Select in Phone Settings: {target_file.name}"
-    return False, "Could not copy to phone ringtones directory"
+    """Deprecated: Ringtone feature removed per user preference."""
+    return False, "Ringtone feature removed"
 
 
 def find_ffmpeg_binary() -> Optional[str]:
@@ -1443,6 +1403,7 @@ class AndroidNativeAudioPlayer:
     def __init__(self, source_path_or_url: str):
         self.state = "stop"
         self._mp = None
+        self._fis = None
         self._source = source_path_or_url
         self._duration = 0.0
         try:
@@ -1457,7 +1418,19 @@ class AndroidNativeAudioPlayer:
                 .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC) \
                 .build()
             self._mp.setAudioAttributes(attrs)
-            self._mp.setDataSource(str(source_path_or_url))
+
+            # Use open FileDescriptor if source is a local file (bypasses media path restrictions)
+            if os.path.exists(str(source_path_or_url)):
+                try:
+                    FileInputStream = autoclass("java.io.FileInputStream")
+                    self._fis = FileInputStream(str(source_path_or_url))
+                    self._mp.setDataSource(self._fis.getFD())
+                except Exception as fd_err:
+                    print(f"[AndroidNativeAudioPlayer] FileInputStream notice: {fd_err}")
+                    self._mp.setDataSource(str(source_path_or_url))
+            else:
+                self._mp.setDataSource(str(source_path_or_url))
+
             self._mp.prepare()
             dur = self._mp.getDuration()
             if dur and dur > 0:
@@ -1470,6 +1443,12 @@ class AndroidNativeAudioPlayer:
                 except Exception:
                     pass
                 self._mp = None
+            if self._fis:
+                try:
+                    self._fis.close()
+                except Exception:
+                    pass
+                self._fis = None
 
     def play(self):
         if self._mp:
@@ -1498,7 +1477,13 @@ class AndroidNativeAudioPlayer:
             except Exception:
                 pass
             self._mp = None
-            self.state = "stop"
+        if hasattr(self, "_fis") and self._fis:
+            try:
+                self._fis.close()
+            except Exception:
+                pass
+            self._fis = None
+        self.state = "stop"
 
     @property
     def is_playing(self) -> bool:
@@ -1789,7 +1774,29 @@ def play_video_file(filepath: Path, title: Optional[str] = None):
                     video_view.setMediaController(mc)
 
                     path_str = str(filepath.resolve())
-                    video_view.setVideoPath(path_str)
+                    try:
+                        os.chmod(path_str, 0o777)
+                    except Exception:
+                        pass
+
+                    # Try resolving content URI via FileProvider on Android 7+ (API 24+)
+                    loaded_via_uri = False
+                    try:
+                        Build = autoclass("android.os.Build")
+                        if Build.VERSION.SDK_INT >= 24:
+                            FileProvider = autoclass("androidx.core.content.FileProvider")
+                            File = autoclass("java.io.File")
+                            pkg = activity.getPackageName()
+                            file_uri = FileProvider.getUriForFile(activity, f"{pkg}.fileprovider", File(path_str))
+                            if file_uri:
+                                video_view.setVideoURI(file_uri)
+                                loaded_via_uri = True
+                    except Exception:
+                        pass
+
+                    if not loaded_via_uri:
+                        video_view.setVideoPath(path_str)
+
                     video_frame.addView(video_view)
                     root.addView(video_frame)
 
@@ -1803,6 +1810,22 @@ def play_video_file(filepath: Path, title: Optional[str] = None):
                         )
 
                     from jnius import PythonJavaClass, java_method
+
+                    class _VideoErrorListener(PythonJavaClass):
+                        __javainterfaces__ = ["android/media/MediaPlayer$OnErrorListener"]
+
+                        @java_method("(Landroid/media/MediaPlayer;II)Z")
+                        def onError(self, mp, what, extra):
+                            print(f"[VideoView] Playback error ({what}, {extra}). Launching fallback player...")
+                            try:
+                                dialog.dismiss()
+                                open_media_file(filepath)
+                            except Exception:
+                                pass
+                            return True
+
+                    dialog._err_listener = _VideoErrorListener()
+                    video_view.setOnErrorListener(dialog._err_listener)
 
                     class _VideoDialogListener(PythonJavaClass):
                         __javainterfaces__ = ["android/view/View$OnClickListener"]
@@ -3095,6 +3118,7 @@ if KIVY_AVAILABLE:
             """Auto-lock private vault when app is minimized, screen turned off, or phone sleeps."""
             if getattr(self, "is_vault_unlocked", False):
                 self.is_vault_unlocked = False
+                clean_vault_playback_cache()
                 if hasattr(self, "filter_btn_vault") and self.filter_btn_vault:
                     self.filter_btn_vault.text = "VAULT"
                     self.filter_btn_vault.set_icon("lock.png")
@@ -4343,6 +4367,7 @@ if KIVY_AVAILABLE:
                 self.play_all_btn.disabled = False
                 self.play_all_btn.width = dp(86)
             self.update_status("[color=#FFB300]Private Vault Locked[/color]", 0)
+            clean_vault_playback_cache()
             self.set_downloads_filter("all")
 
         @mainthread
@@ -4381,8 +4406,11 @@ if KIVY_AVAILABLE:
             is_paused = self.download_state.get("is_paused", False)
             status_tag = "DOWNLOADING NOW" if not is_paused else "DOWNLOAD PAUSED"
             tag_color = "#00E676" if not is_paused else "#FFB300"
+            state_text = f"[b][color={tag_color}]{status_tag}[/color][/b]"
+            if has_queue:
+                state_text += f"  •  [size=10sp][color=#90CAF9]{len(self.download_queue)} queued[/color][/size]"
             state_lbl = Label(
-                text=f"[b][color={tag_color}]{status_tag}[/color][/b]",
+                text=state_text,
                 markup=True,
                 font_size="11sp",
                 size_hint_x=1.0,
@@ -4493,10 +4521,36 @@ if KIVY_AVAILABLE:
 
             # Queued items list
             if has_queue:
-                for q_idx, q_item in enumerate(self.download_queue, start=1):
+                q_head = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(26), spacing=dp(6))
+                q_head_lbl = Label(
+                    text=f"[b][color=#FFB300]DOWNLOAD QUEUE ({len(self.download_queue)} PENDING)[/color][/b]",
+                    markup=True,
+                    font_size="10.5sp",
+                    halign="left",
+                    valign="middle",
+                    size_hint_x=1.0,
+                )
+                q_head_lbl.bind(size=q_head_lbl.setter("text_size"))
+                q_head.add_widget(q_head_lbl)
+
+                clear_q_btn = IconActionButton(
+                    icon_path="clear.png",
+                    text="CLEAR QUEUE",
+                    font_size="9sp",
+                    size_hint=(None, None),
+                    size=(dp(96), dp(24)),
+                    bg_color=(0.28, 0.12, 0.16, 1.0),
+                    text_color=(1.0, 0.8, 0.8, 1.0),
+                    radius=6,
+                )
+                clear_q_btn.bind(on_press=lambda ins: self.clear_download_queue())
+                q_head.add_widget(clear_q_btn)
+                self.active_downloads_container.add_widget(q_head)
+
+                for q_idx, q_item in enumerate(list(self.download_queue), start=1):
                     q_row = StyledCard(
                         orientation="horizontal",
-                        padding=[dp(10), dp(6)],
+                        padding=[dp(10), dp(4)],
                         spacing=dp(6),
                         size_hint_y=None,
                         height=dp(36),
@@ -4505,7 +4559,7 @@ if KIVY_AVAILABLE:
                     )
                     q_title = q_item.get("title") or q_item.get("url") or "Pending download"
                     q_lbl = Label(
-                        text=f"[b][color=#FFB300]QUEUED #{q_idx}[/color][/b]  {safe_display_text(q_title)}",
+                        text=f"[b][color=#FFB300]#{q_idx}[/color][/b]  {safe_display_text(q_title)}",
                         markup=True,
                         font_size="10.5sp",
                         color=(0.8, 0.85, 0.95, 1.0),
@@ -4517,7 +4571,34 @@ if KIVY_AVAILABLE:
                     )
                     q_lbl.bind(size=q_lbl.setter("text_size"))
                     q_row.add_widget(q_lbl)
+
+                    remove_q_btn = IconActionButton(
+                        icon_path="close.png",
+                        text="",
+                        icon_size=(dp(12), dp(12)),
+                        size_hint=(None, None),
+                        size=(dp(28), dp(26)),
+                        bg_color=(0.35, 0.12, 0.15, 1.0),
+                        radius=6,
+                    )
+                    remove_q_btn.bind(on_press=lambda ins, idx=q_idx-1: self.remove_from_download_queue(idx))
+                    q_row.add_widget(remove_q_btn)
                     self.active_downloads_container.add_widget(q_row)
+
+        def remove_from_download_queue(self, index: int):
+            """Remove a specific pending item from the multiple download queue."""
+            if 0 <= index < len(self.download_queue):
+                removed = self.download_queue.pop(index)
+                title = safe_display_text(removed.get("title") or "Item")
+                self.update_status(f"[color=#FFB300]Removed from queue:[/color] {title}", 0)
+                self.rebuild_active_downloads_section()
+
+        def clear_download_queue(self):
+            """Cancel and clear all pending background items in download queue."""
+            count = len(self.download_queue)
+            self.download_queue.clear()
+            self.update_status(f"[color=#FFB300]Cleared {count} queued downloads.[/color]", 0)
+            self.rebuild_active_downloads_section()
 
         @mainthread
         def update_active_downloads_widget(self, text: str, progress_val: Optional[float] = None):
@@ -6401,13 +6482,12 @@ if KIVY_AVAILABLE:
                     top_row.add_widget(info_box)
 
                     # Tap top row to play immediately
-                    def on_row_click(instance, touch, p=media_path, is_aud=is_audio_file, in_v=is_vault, t=clean_name):
+                    def on_row_click(instance, touch, p=media_path, is_aud=is_audio_file, t=clean_name):
                         if instance.collide_point(*touch.pos):
-                            play_target = prepare_vault_file_for_playback(p) if in_v else p
                             if is_aud:
-                                self.play_audio_track(play_target)
+                                self.play_audio_track(p)
                             else:
-                                self.play_video_file(play_target, title=t)
+                                self.play_video_file(p, title=t)
                             return True
                         return False
                     top_row.bind(on_touch_down=on_row_click)
@@ -6430,14 +6510,13 @@ if KIVY_AVAILABLE:
                         bg_color=(0.10, 0.55, 0.28, 1.0),
                         text_color=(1, 1, 1, 1),
                         radius=6,
-                        size_hint_x=0.28 if (is_audio_file and not is_vault) else 0.35,
+                        size_hint_x=0.35,
                     )
-                    def do_play(ins, p=media_path, is_aud=is_audio_file, in_v=is_vault, t=clean_name):
-                        play_target = prepare_vault_file_for_playback(p) if in_v else p
+                    def do_play(ins, p=media_path, is_aud=is_audio_file, t=clean_name):
                         if is_aud:
-                            self.play_audio_track(play_target)
+                            self.play_audio_track(p)
                         else:
-                            self.play_video_file(play_target, title=t)
+                            self.play_video_file(p, title=t)
                     play_btn.bind(on_press=do_play)
                     btn_row.add_widget(play_btn)
 
@@ -6456,25 +6535,6 @@ if KIVY_AVAILABLE:
                         unlock_btn.bind(on_press=lambda ins, p=media_path: self.restore_file_from_vault(p))
                         btn_row.add_widget(unlock_btn)
                     else:
-                        # Audio-specific: SET AS RINGTONE BUTTON
-                        if is_audio_file:
-                            ring_btn = IconActionButton(
-                                icon_path="music.png",
-                                text="RING",
-                                font_size="9.5sp",
-                                icon_size=(dp(13), dp(13)),
-                                bg_color=(0.12, 0.34, 0.46, 1.0),
-                                text_color=(0.85, 0.95, 1.0, 1.0),
-                                radius=6,
-                                size_hint_x=0.24,
-                            )
-                            def do_ring(ins, p=media_path):
-                                ok, msg = set_audio_as_ringtone(p)
-                                col = "#00E676" if ok else "#FF5252"
-                                self.update_status(f"[color={col}]{msg}[/color]", 0)
-                            ring_btn.bind(on_press=do_ring)
-                            btn_row.add_widget(ring_btn)
-
                         # LOCK BUTTON (Move to Private Vault)
                         lock_btn = IconActionButton(
                             icon_path="lock.png",
@@ -6484,7 +6544,7 @@ if KIVY_AVAILABLE:
                             bg_color=(0.35, 0.12, 0.22, 1.0),
                             text_color=(1.0, 0.85, 0.90, 1.0),
                             radius=6,
-                            size_hint_x=0.24 if is_audio_file else 0.35,
+                            size_hint_x=0.35,
                         )
                         lock_btn.bind(on_press=lambda ins, p=media_path: self.move_file_to_vault(p))
                         btn_row.add_widget(lock_btn)
@@ -6498,7 +6558,7 @@ if KIVY_AVAILABLE:
                         bg_color=(0.58, 0.12, 0.14, 1.0),
                         text_color=(1, 1, 1, 1),
                         radius=6,
-                        size_hint_x=0.24 if (is_audio_file and not is_vault) else 0.30,
+                        size_hint_x=0.30,
                     )
                     del_btn.bind(on_press=lambda ins, p=media_path, c=card: self.on_delete_clicked(p, c))
                     btn_row.add_widget(del_btn)
@@ -7167,7 +7227,7 @@ if KIVY_AVAILABLE:
             """Play downloaded local video file with native hardware acceleration and live notification support."""
             if not file_path or not file_path.exists():
                 return
-            is_vault_video = is_vault_path(file_path) or file_path.name.endswith(".mskvault")
+            is_vault_video = is_vault_path(file_path) or file_path.name.endswith(".mskvault") or ".vault" in file_path.parts
             play_target = prepare_vault_file_for_playback(file_path) if is_vault_video else file_path
             clean_title = safe_display_text(title or (get_vault_display_name(file_path) if is_vault_video else file_path.stem))
             self.update_status(f"[color=#00E676]Playing Video:[/color] {clean_title}", 0)
@@ -7178,13 +7238,17 @@ if KIVY_AVAILABLE:
             if not file_path or not file_path.exists():
                 return
 
-            is_vault_audio = is_vault_path(file_path) or file_path.name.endswith(".mskvault")
+            is_vault_audio = is_vault_path(file_path) or file_path.name.endswith(".mskvault") or ".vault" in file_path.parts
             play_target = prepare_vault_file_for_playback(file_path) if is_vault_audio else file_path
 
             # Refresh local audio playlist
             if is_vault_audio:
                 v_dir = get_vault_dir()
-                self.audio_playlist = [p for p in v_dir.iterdir() if p.is_file() and p.name not in (".nomedia", ".pin_hash", ".pin_salt")]
+                self.audio_playlist = [
+                    p for p in v_dir.iterdir()
+                    if p.is_file() and p.name not in (".nomedia", ".pin_hash", ".pin_salt")
+                    and get_vault_media_ext(p).lower() in (".mp3", ".m4a", ".wav", ".ogg", ".opus", ".flac", ".aac")
+                ]
             else:
                 target_dir = get_android_download_dir()
                 audio_files = []

@@ -383,6 +383,7 @@ def test_vault_pin_hashing_and_verification(tmp_path):
 
 
 def test_set_audio_as_ringtone(tmp_path):
+    """Verify set_audio_as_ringtone is cleanly deprecated per user request."""
     from mobile_app import set_audio_as_ringtone
     # Non-existent file
     ok, msg = set_audio_as_ringtone(tmp_path / "missing.mp3")
@@ -391,13 +392,9 @@ def test_set_audio_as_ringtone(tmp_path):
     # Actual file
     sample = tmp_path / "tune.mp3"
     sample.write_text("audio-data")
-    with patch("mobile_app.get_android_download_dir", return_value=tmp_path):
-        with patch("mobile_app.scan_media_file") as mock_scan:
-            ok, msg = set_audio_as_ringtone(sample)
-            assert ok is True
-            assert "Ringtones" in msg
-            assert mock_scan.called
-            assert (tmp_path / "Ringtones" / "tune.mp3").exists()
+    ok, msg = set_audio_as_ringtone(sample)
+    assert ok is False
+    assert "removed" in msg.lower()
 
 
 def test_storage_cleaner_removes_orphans(tmp_path):
@@ -823,6 +820,66 @@ def test_manual_refresh_library_and_deleted_filter(tmp_path):
     app.refresh_library()
     # The deleted_filenames filter prevents deleted_song from being added to the UI
     assert "deleted_song.mp3" in app.deleted_filenames
+
+
+def test_ringtone_feature_removed():
+    """Verify set_audio_as_ringtone is cleanly deprecated and returns false."""
+    from mobile_app import set_audio_as_ringtone
+    from pathlib import Path
+    ok, msg = set_audio_as_ringtone(Path("test.mp3"))
+    assert ok is False
+    assert "removed" in msg.lower()
+
+
+def test_vault_playback_preparation_and_clean_cache(tmp_path, monkeypatch):
+    """Verify prepare_vault_file_for_playback stages playable file in .vault/.play and clean cache works."""
+    from mobile_app import prepare_vault_file_for_playback, clean_vault_playback_cache
+    import mobile_app
+
+    vault_dir = tmp_path / ".vault"
+    vault_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(mobile_app, "get_vault_dir", lambda: vault_dir)
+
+    dummy_vault_file = vault_dir / ".secret_video.mp4.mskvault"
+    dummy_vault_file.write_text("dummy mp4 video bytes")
+
+    staged = prepare_vault_file_for_playback(dummy_vault_file)
+    assert staged.exists()
+    assert staged.name == "secret_video.mp4"
+    assert staged.parent == vault_dir / ".play"
+    assert (vault_dir / ".play" / ".nomedia").exists()
+
+    # Verify instant reuse if identical
+    staged2 = prepare_vault_file_for_playback(dummy_vault_file)
+    assert staged2 == staged
+
+    # Clean cache
+    clean_vault_playback_cache()
+    assert not staged.exists()
+    assert (vault_dir / ".play" / ".nomedia").exists()
+
+
+def test_download_queue_management():
+    """Verify multiple media download queue manipulation methods."""
+    from mobile_app import MSKDownloaderMobile
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    app.download_queue = [
+        {"title": "Video 1", "url": "https://youtu.be/aaa"},
+        {"title": "Video 2", "url": "https://youtu.be/bbb"},
+        {"title": "Video 3", "url": "https://youtu.be/ccc"},
+    ]
+    app.update_status = lambda msg, val: None
+    app.rebuild_active_downloads_section = lambda: None
+
+    # Remove middle item
+    app.remove_from_download_queue(1)
+    assert len(app.download_queue) == 2
+    assert app.download_queue[0]["title"] == "Video 1"
+    assert app.download_queue[1]["title"] == "Video 3"
+
+    # Clear queue
+    app.clear_download_queue()
+    assert len(app.download_queue) == 0
 
 
 
