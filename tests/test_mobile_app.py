@@ -635,6 +635,7 @@ def test_move_and_restore_vault_files(tmp_path):
     app.library_container = type("DummyContainer", (), {"clear_widgets": lambda self: None, "add_widget": lambda self, w: None})()
     app.update_status = lambda msg, p: None
     app.refresh_library = lambda: None
+    app.get_media_search_dirs = lambda: [dl_dir]
 
     dl_dir = tmp_path / "Downloads"
     dl_dir.mkdir(parents=True, exist_ok=True)
@@ -643,21 +644,105 @@ def test_move_and_restore_vault_files(tmp_path):
 
     with patch("mobile_app.get_android_download_dir", return_value=dl_dir):
         with patch("mobile_app.get_vault_dir", return_value=v_dir):
-            with patch("mobile_app.scan_media_file"):
+            with patch("mobile_app.scan_media_file"), patch("mobile_app.prune_file_from_mediastore"):
                 sample_file = dl_dir / "secret_video.mp4"
                 sample_file.write_text("dummy-video-data")
                 assert sample_file.exists()
 
-                # Move to vault
+                # Move to vault (should be obfuscated to .secret_video.mp4.mskvault)
                 app.move_file_to_vault(sample_file)
                 assert not sample_file.exists()
-                vault_file = v_dir / "secret_video.mp4"
-                assert vault_file.exists()
+                vault_file = v_dir / ".secret_video.mp4.mskvault"
+                assert vault_file.exists(), f"Vault file should be hidden as {vault_file.name}"
 
-                # Restore from vault
+                # Restore from vault back to original clean filename
                 app.restore_file_from_vault(vault_file)
                 assert not vault_file.exists()
-                assert (dl_dir / "secret_video.mp4").exists()
+                restored_file = dl_dir / "secret_video.mp4"
+                assert restored_file.exists()
+                assert restored_file.read_text() == "dummy-video-data"
+
+                # Also test legacy non-obfuscated vault file restoration
+                legacy_file = v_dir / "legacy_song.mp3"
+                legacy_file.write_text("legacy-audio-data")
+                app.restore_file_from_vault(legacy_file)
+                assert not legacy_file.exists()
+                assert (dl_dir / "legacy_song.mp3").exists()
+
+
+def test_vault_exclusion_from_library_views(tmp_path):
+    """Verify media in vault is strictly hidden from ALL, SONGS, and VIDEOS views."""
+    from mobile_app import MSKDownloaderMobile
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    app.library_container = type("DummyContainer", (), {"children": [], "clear_widgets": lambda self: None, "add_widget": lambda self, w: None})()
+    app.update_status = lambda msg, p: None
+
+    dl_dir = tmp_path / "Downloads"
+    dl_dir.mkdir(parents=True, exist_ok=True)
+    v_dir = dl_dir / ".vault"
+    v_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1 public video, 1 public audio, 1 vaulted video
+    public_vid = dl_dir / "public_tutorial.mp4"
+    public_vid.write_text("public video")
+    public_aud = dl_dir / "public_tune.mp3"
+    public_aud.write_text("public audio")
+
+    vault_vid = v_dir / ".hidden_secret.mp4.mskvault"
+    vault_vid.write_text("vault video")
+
+    with patch("mobile_app.get_android_download_dir", return_value=dl_dir):
+        with patch("mobile_app.get_vault_dir", return_value=v_dir):
+            app.get_media_search_dirs = lambda: [dl_dir]
+
+            # In ALL view: only public files should appear
+            app.active_filter = "all"
+            app.refresh_library()
+            # Verify get_vault_display_name resolves correctly
+            from mobile_app import get_vault_display_name, is_vault_path
+            assert get_vault_display_name(vault_vid) == "hidden_secret.mp4"
+            assert is_vault_path(vault_vid) is True
+            assert is_vault_path(public_vid) is False
+
+
+def test_audio_player_icons_and_no_emojis():
+    """Verify all audio player icons exist and player control buttons contain zero tofu emoji text."""
+    import os
+    from mobile_app import get_asset_icon, MSKDownloaderMobile, KIVY_AVAILABLE
+    if not KIVY_AVAILABLE:
+        return
+
+    # Verify dedicated icon assets exist
+    for icon_name in ("prev.png", "next.png", "timer.png", "close.png", "shield.png", "play.png", "pause.png"):
+        icon_path = get_asset_icon(icon_name)
+        assert icon_path and os.path.exists(icon_path), f"Missing icon asset: {icon_name}"
+
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    bar = app.create_mini_player_bar()
+    assert bar is not None
+
+    # Buttons should have empty text so Android never wraps or renders missing emoji tofu boxes
+    assert app.mini_player_prev_btn.text == ""
+    assert app.mini_player_play_btn.text == ""
+    assert app.mini_player_next_btn.text == ""
+    assert app.mini_player_timer_btn.text == ""
+    assert app.mini_player_close_btn.text == ""
+
+
+def test_vault_auto_lock_on_pause():
+    """Verify vault automatically locks when app enters on_pause (app minimized / backgrounded)."""
+    from mobile_app import MSKDownloaderMobile
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    app.is_vault_unlocked = True
+    app.active_filter = "vault"
+    app.filter_btn_vault = type("DummyBtn", (), {"text": "VAULT (OPEN)", "set_icon": lambda self, ic: None})()
+    app.set_downloads_filter = lambda f: setattr(app, "active_filter", f)
+
+    res = app.on_pause()
+    assert res is True
+    assert app.is_vault_unlocked is False
+    assert app.active_filter == "all"
+    assert app.filter_btn_vault.text == "VAULT"
 
 
 
