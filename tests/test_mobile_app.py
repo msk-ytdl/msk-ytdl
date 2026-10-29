@@ -70,11 +70,21 @@ def test_sanitize_storage_filename_keeps_long_names():
     assert "Brahmastra" in sanitized
 
 
-def test_reels_icon_asset():
+def test_nav_icon_assets():
     from pathlib import Path
-    reels_icon = Path("assets/icons/reels.png")
-    assert reels_icon.exists()
-    assert reels_icon.stat().st_size > 0
+    for icon_name in ("home.png", "videos.png", "downloads.png", "lock.png", "unlock.png", "music.png", "pause.png", "check.png", "delete.png", "play.png"):
+        icon_path = Path("assets/icons") / icon_name
+        assert icon_path.exists()
+        assert icon_path.stat().st_size > 0
+
+
+def test_reels_and_shorts_views_removed():
+    from mobile_app import MSKDownloaderMobile
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    assert not hasattr(app, "build_reels_view")
+    assert not hasattr(app, "populate_reels")
+    assert not hasattr(app, "filter_reels")
+    assert not hasattr(app, "add_reel_card")
 
 
 def test_get_android_download_dir():
@@ -554,6 +564,101 @@ def test_format_option_card_size_text_display():
     assert "45.2 MB" in card.sub_lbl.text
     assert card.size_lbl.text == "[b]45.2 MB[/b]"
     assert card.height > 50
+
+
+def test_active_downloads_container_rebuild():
+    from mobile_app import MSKDownloaderMobile, KIVY_AVAILABLE
+    if not KIVY_AVAILABLE:
+        return
+    from kivy.clock import Clock
+    from kivy.uix.boxlayout import BoxLayout
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    app.download_state = {
+        "is_active": True,
+        "is_paused": False,
+        "title": "Python Async Programming Tutorial",
+        "format": "1080p Full HD MP4",
+        "percent": 45,
+        "speed_str": "3.8 MB/s",
+        "status_msg": "Downloading chunks...",
+    }
+    app.download_queue = []
+    app.active_downloads_container = BoxLayout(orientation="vertical")
+
+    # Rebuild active section (Clock.tick dispatches @mainthread callback)
+    app.rebuild_active_downloads_section()
+    Clock.tick()
+    assert len(app.active_downloads_container.children) > 0
+    assert hasattr(app, "active_dl_title")
+    assert "Python Async Programming" in app.active_dl_title.text
+    assert hasattr(app, "active_dl_bar")
+    assert app.active_dl_bar.value == 45
+
+    # Update real-time widget
+    app.update_active_downloads_widget("Downloading: 75% • 4.5 MB/s", progress_val=75)
+    Clock.tick()
+    assert app.active_dl_bar.value == 75
+    assert app.active_dl_pct.text == "[b]75%[/b]"
+
+    # When download becomes inactive
+    app.download_state["is_active"] = False
+    app.rebuild_active_downloads_section()
+    Clock.tick()
+    assert len(app.active_downloads_container.children) == 0
+
+
+def test_vault_auto_lock_on_tab_switch():
+    from mobile_app import MSKDownloaderMobile, KIVY_AVAILABLE
+    if not KIVY_AVAILABLE:
+        return
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    app.active_tab = "downloads"
+    app.is_vault_unlocked = True
+    app.main_container = type("DummyContainer", (), {"children": [1], "clear_widgets": lambda self: None, "add_widget": lambda self, w: None})()
+    app.nav_btn_home = type("DummyBtn", (), {"set_active": lambda self, a: None})()
+    app.nav_btn_videos = type("DummyBtn", (), {"set_active": lambda self, a: None})()
+    app.nav_btn_downloads = type("DummyBtn", (), {"set_active": lambda self, a: None})()
+    app.home_view = None
+    app.videos_view = None
+    app.downloads_view = None
+
+    # Switch away to home
+    app.switch_tab("home")
+    # Vault must be locked automatically
+    assert app.is_vault_unlocked is False
+    assert app.active_tab == "home"
+
+
+def test_move_and_restore_vault_files(tmp_path):
+    from mobile_app import MSKDownloaderMobile
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    app.library_container = type("DummyContainer", (), {"clear_widgets": lambda self: None, "add_widget": lambda self, w: None})()
+    app.update_status = lambda msg, p: None
+    app.refresh_library = lambda: None
+
+    dl_dir = tmp_path / "Downloads"
+    dl_dir.mkdir(parents=True, exist_ok=True)
+    v_dir = dl_dir / ".vault"
+    v_dir.mkdir(parents=True, exist_ok=True)
+
+    with patch("mobile_app.get_android_download_dir", return_value=dl_dir):
+        with patch("mobile_app.get_vault_dir", return_value=v_dir):
+            with patch("mobile_app.scan_media_file"):
+                sample_file = dl_dir / "secret_video.mp4"
+                sample_file.write_text("dummy-video-data")
+                assert sample_file.exists()
+
+                # Move to vault
+                app.move_file_to_vault(sample_file)
+                assert not sample_file.exists()
+                vault_file = v_dir / "secret_video.mp4"
+                assert vault_file.exists()
+
+                # Restore from vault
+                app.restore_file_from_vault(vault_file)
+                assert not vault_file.exists()
+                assert (dl_dir / "secret_video.mp4").exists()
+
 
 
 
