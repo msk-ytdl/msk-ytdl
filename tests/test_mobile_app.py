@@ -882,6 +882,71 @@ def test_download_queue_management():
     assert len(app.download_queue) == 0
 
 
+def test_extract_all_media_urls():
+    """Verify extracting multiple media URLs from multi-line or mixed text."""
+    from mobile_app import extract_all_media_urls
+
+    raw = """
+    Check out these videos:
+    https://www.youtube.com/watch?v=dQw4w9WgXcQ
+    and also this one: https://youtu.be/9bZkp7q19f0, https://instagram.com/reel/Cx12345
+    https://www.youtube.com/watch?v=dQw4w9WgXcQ
+    """
+    urls = extract_all_media_urls(raw)
+    assert len(urls) == 3
+    assert urls[0] == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    assert urls[1] == "https://www.youtube.com/watch?v=9bZkp7q19f0"
+    assert urls[2] == "https://www.instagram.com/reel/Cx12345/"
+
+    assert extract_all_media_urls("") == []
+    assert extract_all_media_urls(None) == []
+
+
+def test_normalize_media_url_playlists():
+    """Verify normalize_media_url handles music.youtube.com and complex playlist URLs."""
+    from mobile_app import normalize_media_url
+
+    # Standard playlist
+    u1 = normalize_media_url("https://www.youtube.com/playlist?list=PL1234567890")
+    assert u1 == "https://www.youtube.com/playlist?list=PL1234567890"
+
+    # Music youtube playlist
+    u2 = normalize_media_url("https://music.youtube.com/playlist?list=RDCLAK5uy_kmPRjGh")
+    assert u2 == "https://www.youtube.com/playlist?list=RDCLAK5uy_kmPRjGh"
+
+    # Watch URL with list
+    u3 = normalize_media_url("https://www.youtube.com/watch?v=abc12345678&list=PL1234567890&feature=shared")
+    assert u3 == "https://www.youtube.com/playlist?list=PL1234567890"
+
+    # Mix / 2-char playlist ID
+    u4 = normalize_media_url("https://www.youtube.com/playlist?list=WL")
+    assert u4 == "https://www.youtube.com/playlist?list=WL"
+
+
+def test_load_batch_preview():
+    """Verify MSKDownloaderMobile.load_batch_preview constructs multi-entry preview."""
+    from mobile_app import MSKDownloaderMobile
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    app.current_preview_info = None
+    app.update_preview_ui = lambda *args: None
+
+    urls = [
+        "https://www.youtube.com/watch?v=video111111",
+        "https://www.youtube.com/watch?v=video222222",
+        "https://youtu.be/video333333",
+    ]
+    app.load_batch_preview(urls, auto_open_modal=False)
+
+    assert app.current_preview_info is not None
+    assert app.current_preview_info["is_batch"] is True
+    assert app.current_preview_info["title"] == "Batch: 3 Videos"
+    assert len(app.current_preview_info["entries"]) == 3
+    assert app.current_preview_info["entries"][0]["id"] == "video111111"
+    assert app.current_preview_info["entries"][1]["id"] == "video222222"
+    assert app.current_preview_info["entries"][2]["id"] == "video333333"
+
+
+
 
 
 

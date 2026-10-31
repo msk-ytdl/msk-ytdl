@@ -933,7 +933,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     # Check if target is a playlist
-    is_playlist = args.playlist or ("/playlist?" in args.url and "list=" in args.url)
+    is_playlist = args.playlist or ("list=" in args.url and not args.url.endswith("list="))
 
     # Info-only mode
     if args.info:

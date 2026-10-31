@@ -171,15 +171,16 @@ def validate_audio_quality(quality: str | int) -> str:
     return q
 
 
-_PLAYLIST_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{10,64}$")
+_PLAYLIST_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{2,128}$")
 
 
 def validate_youtube_playlist_url(url: str) -> Tuple[str, str]:
     """
     Validate a YouTube playlist URL and extract its canonical playlist URL and playlist ID.
 
-    Accepts both standard playlist URLs (e.g., https://www.youtube.com/playlist?list=PL...)
-    and watch URLs containing playlist parameters (e.g., https://www.youtube.com/watch?v=...&list=PL...).
+    Accepts standard playlist URLs (e.g., https://www.youtube.com/playlist?list=PL...),
+    watch URLs containing playlist parameters (e.g., https://www.youtube.com/watch?v=...&list=PL...),
+    and YouTube Music or mobile shortened playlist links.
 
     Returns:
         (canonical_playlist_url, playlist_id)
@@ -212,13 +213,20 @@ def validate_youtube_playlist_url(url: str) -> Tuple[str, str]:
     query_params = urllib.parse.parse_qs(parsed.query)
     list_param = query_params.get("list")
 
-    if not list_param or not list_param[0]:
+    playlist_id: Optional[str] = None
+    if list_param and list_param[0]:
+        playlist_id = list_param[0].strip()
+    else:
+        m_list = re.search(r"[?&]list=([a-zA-Z0-9_-]+)", url)
+        if m_list:
+            playlist_id = m_list.group(1).strip()
+
+    if not playlist_id:
         raise ValidationError(
             "The provided URL does not contain a playlist 'list=' parameter.",
             guidance="Ensure your URL contains '?list=...' (e.g., https://www.youtube.com/playlist?list=PL...)."
         )
 
-    playlist_id = list_param[0].strip()
     if not _PLAYLIST_ID_PATTERN.match(playlist_id):
         raise ValidationError(
             f"Invalid playlist ID format '{playlist_id}'.",

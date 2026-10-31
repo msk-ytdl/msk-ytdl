@@ -168,6 +168,20 @@ class TestPlaylistAndBatchValidation:
         assert pid == "PLrAXtmErZgOdP_8GztsuKi9f5QVVV4g7f"
         assert canonical == "https://www.youtube.com/playlist?list=PLrAXtmErZgOdP_8GztsuKi9f5QVVV4g7f"
 
+    def test_valid_short_and_special_playlist_ids(self):
+        # Watch later (WL), Liked videos (LL)
+        c1, p1 = validate_youtube_playlist_url("https://www.youtube.com/playlist?list=WL")
+        assert p1 == "WL"
+        assert c1 == "https://www.youtube.com/playlist?list=WL"
+
+        c2, p2 = validate_youtube_playlist_url("https://music.youtube.com/playlist?list=OLAK5uy_k1234567890abcdef")
+        assert p2 == "OLAK5uy_k1234567890abcdef"
+        assert c2 == "https://www.youtube.com/playlist?list=OLAK5uy_k1234567890abcdef"
+
+        # Query param list after other parameters
+        c3, p3 = validate_youtube_playlist_url("https://www.youtube.com/watch?feature=shared&v=dQw4w9WgXcQ&list=PLrAXtmErZgOdP_8GztsuKi9f5QVVV4g7f")
+        assert p3 == "PLrAXtmErZgOdP_8GztsuKi9f5QVVV4g7f"
+
     def test_invalid_playlist_url_empty_or_bad_scheme(self):
         with pytest.raises(ValidationError):
             validate_youtube_playlist_url("")

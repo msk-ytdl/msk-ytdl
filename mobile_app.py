@@ -139,9 +139,9 @@ def normalize_media_url(text: str) -> Optional[str]:
         return None
     raw = text.strip()
 
-    # 1. Direct YouTube playlist URL: youtube.com/playlist?list=...
+    # 1. Direct YouTube playlist URL: youtube.com/playlist?list=... or with other params
     match_plist = re.search(
-        r"https?://(?:www\.|m\.)?youtube\.com/playlist\?list=([a-zA-Z0-9_-]+)",
+        r"https?://(?:www\.|m\.|music\.)?youtube\.com/playlist\?(?:[^\s]*&)?list=([a-zA-Z0-9_-]+)",
         raw,
     )
     if match_plist:
@@ -153,7 +153,7 @@ def normalize_media_url(text: str) -> Optional[str]:
 
     # 3. Full YouTube watch, youtu.be, shorts, live, or embed URL with video ID
     match_yt = re.search(
-        r"https?://(?:www\.|m\.)?(?:youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})|youtu\.be/([a-zA-Z0-9_-]{11})|youtube\.com/shorts/([a-zA-Z0-9_-]{11})|youtube\.com/live/([a-zA-Z0-9_-]{11})|youtube\.com/embed/([a-zA-Z0-9_-]{11}))",
+        r"https?://(?:www\.|m\.|music\.)?(?:youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})|youtu\.be/([a-zA-Z0-9_-]{11})|youtube\.com/shorts/([a-zA-Z0-9_-]{11})|youtube\.com/live/([a-zA-Z0-9_-]{11})|youtube\.com/embed/([a-zA-Z0-9_-]{11}))",
         raw,
     )
     if match_yt:
@@ -164,12 +164,12 @@ def normalize_media_url(text: str) -> Optional[str]:
             or match_yt.group(4)
             or match_yt.group(5)
         )
-        if plist_id and not plist_id.startswith("RD") and not plist_id.startswith("TL"):
+        if plist_id:
             return f"https://www.youtube.com/playlist?list={plist_id}"
         return f"https://www.youtube.com/watch?v={vid}"
 
     # 4. Standalone playlist query: 'list=PL...'
-    if plist_id and not plist_id.startswith("RD"):
+    if plist_id:
         return f"https://www.youtube.com/playlist?list={plist_id}"
 
     # 5. Query fragment: 'v=UQyh7QIVaDU' or 'watch?v=UQyh7QIVaDU'
@@ -213,6 +213,33 @@ def normalize_media_url(text: str) -> Optional[str]:
     return None
 
 
+def extract_all_media_urls(text: str) -> List[str]:
+    """
+    Parse text containing one or multiple URLs separated by newlines, commas,
+    spaces, or bullet points, and return list of canonicalized URLs.
+    """
+    if not text or not isinstance(text, str):
+        return []
+
+    # First find all explicit http/https URLs
+    raw_urls = re.findall(r"https?://[^\s,\"\']+", text)
+    if not raw_urls:
+        # Check if line-delimited or comma-delimited strings/IDs
+        parts = re.split(r"[\r\n,]+", text)
+        raw_urls = [p.strip() for p in parts if p.strip()]
+
+    valid_urls = []
+    seen = set()
+    for raw in raw_urls:
+        clean = raw.rstrip(".,;)]}>\"\' ")
+        norm = normalize_media_url(clean)
+        if norm and norm not in seen:
+            seen.add(norm)
+            valid_urls.append(norm)
+
+    return valid_urls
+
+
 def normalize_youtube_url(text: str) -> Optional[str]:
     """Compatibility alias for normalize_media_url."""
     return normalize_media_url(text)
@@ -246,22 +273,28 @@ def get_canonical_video_url(item: Dict[str, Any], fallback_url: str = "") -> str
     if vid_id and len(str(vid_id)) == 11 and re.match(r"^[a-zA-Z0-9_-]{11}$", str(vid_id)):
         return f"https://www.youtube.com/watch?v={vid_id}"
 
-    # 2. Extract ID from webpage_url, url, or fallback_url
-    for cand in (item.get("webpage_url"), item.get("url"), fallback_url):
+    # 2. Extract ID from item's webpage_url or url first, before looking at fallback_url
+    for cand in (item.get("webpage_url"), item.get("url")):
         if cand and isinstance(cand, str):
             m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/|live/)([a-zA-Z0-9_-]{11})", cand)
             if m:
                 return f"https://www.youtube.com/watch?v={m.group(1)}"
 
-    # 3. For non-YouTube platforms, return original webpage_url or clean url
+    # 3. If item URL itself is a valid web link (non-CDN)
+    for cand in (item.get("webpage_url"), item.get("url")):
+        if cand and isinstance(cand, str) and cand.startswith("http") and "googlevideo.com" not in cand and "videoplayback" not in cand:
+            return cand
+
+    # 4. Fallback URL extraction if single video fallback exists
+    if fallback_url and isinstance(fallback_url, str):
+        m_fb = re.search(r"(?:v=|youtu\.be/|shorts/|embed/|live/)([a-zA-Z0-9_-]{11})", fallback_url)
+        if m_fb:
+            return f"https://www.youtube.com/watch?v={m_fb.group(1)}"
+
+    # 5. Non-YouTube platforms or raw fallback
     target_plat = detect_media_platform(fallback_url or item.get("webpage_url", "") or item.get("url", ""))
     if target_plat != "YouTube":
         return item.get("webpage_url") or item.get("url") or fallback_url
-
-    # 4. If it's a playlist URL or non-CDN URL, return it directly
-    for cand in (fallback_url, item.get("webpage_url"), item.get("url")):
-        if cand and isinstance(cand, str) and "googlevideo.com" not in cand and "videoplayback" not in cand:
-            return cand
 
     return fallback_url
 
@@ -5181,12 +5214,16 @@ if KIVY_AVAILABLE:
         # Home Page Search & Recommendations Logic
         # -----------------------------------------------------------------
         def on_main_download_clicked(self, instance):
-            """Trigger download options modal for currently entered URL or active preview."""
+            """Trigger download options modal for currently entered URL(s) or active preview."""
             url = self.url_input.text.strip()
             if not url:
-                self.update_status("[color=#FF5252]Paste a YouTube link or search first![/color]", 0)
+                self.update_status("[color=#FF5252]Paste a video/playlist link or search first![/color]", 0)
                 return
-            normalized = normalize_youtube_url(url)
+            all_urls = extract_all_media_urls(url)
+            if len(all_urls) > 1:
+                self.load_batch_preview(all_urls, auto_open_modal=True)
+                return
+            normalized = all_urls[0] if all_urls else normalize_youtube_url(url)
             if not normalized:
                 self.search_youtube_home(url)
                 return
@@ -5620,7 +5657,8 @@ if KIVY_AVAILABLE:
                         "count": 1,
                     }
 
-            is_plist = bool(media_item.get("is_playlist", False) or "playlist" in media_item.get("url", "").lower() or "list=" in media_item.get("url", "").lower())
+            is_batch = bool(media_item.get("is_batch", False))
+            is_plist = bool(is_batch or media_item.get("is_playlist", False) or "playlist" in media_item.get("url", "").lower() or "list=" in media_item.get("url", "").lower())
             count = media_item.get("count", 1)
 
             modal = ModalView(size_hint=(0.94, 0.84), auto_dismiss=True)
@@ -5639,8 +5677,9 @@ if KIVY_AVAILABLE:
                 header_row.add_widget(
                     Image(source=dl_icon_path, size_hint=(None, None), size=(dp(22), dp(22)), allow_stretch=True, keep_ratio=True)
                 )
+            modal_title_text = "[b]Select Download Format[/b]" if not is_plist else (f"[b]Download Multiple Videos ({count} Videos)[/b]" if is_batch else f"[b]Download Playlist ({count} Videos)[/b]")
             m_title = Label(
-                text="[b]Select Download Format[/b]" if not is_plist else f"[b]Download Playlist ({count} Videos)[/b]",
+                text=modal_title_text,
                 markup=True,
                 font_size="14sp",
                 color=(1.0, 0.75, 0.0, 1.0),
@@ -5704,7 +5743,7 @@ if KIVY_AVAILABLE:
             minfo_col.add_widget(m_tlbl)
 
             uploader_str = safe_display_text(media_item.get("channel") or media_item.get("uploader") or "YouTube")
-            type_tag = f"[color=#FFB300]PLAYLIST ({count} videos)[/color]" if is_plist else f"[color=#38BDF8]VIDEO[/color] • {media_item.get('duration', 'Media')}"
+            type_tag = (f"[color=#FFB300]BATCH ({count} videos)[/color]" if is_batch else f"[color=#FFB300]PLAYLIST ({count} videos)[/color]") if is_plist else f"[color=#38BDF8]VIDEO[/color] • {media_item.get('duration', 'Media')}"
             m_sublbl = Label(
                 text=f"{type_tag} • {uploader_str[:22]}",
                 markup=True,
@@ -5738,13 +5777,15 @@ if KIVY_AVAILABLE:
 
             selected_state = {"format": initial_fmt}
             option_cards: Dict[str, Any] = {}
+            update_sel_callback = [None]
+            selected_map: Dict[int, bool] = {}
 
             def on_option_picked(key):
                 selected_state["format"] = key
                 for k, c in option_cards.items():
                     c.set_selected(k == key)
-                if is_plist and "update_sel_ui" in locals():
-                    update_sel_ui()
+                if is_plist and update_sel_callback[0]:
+                    update_sel_callback[0]()
 
             if is_plist:
                 raw_entries = list(media_item.get("entries") or [])
@@ -5827,7 +5868,8 @@ if KIVY_AVAILABLE:
                 opts_box.add_widget(sel_header)
 
                 # Items checklist
-                selected_map = {i: True for i in range(total_entries)}
+                selected_map.clear()
+                selected_map.update({i: True for i in range(total_entries)})
                 row_widgets = []
 
                 def update_sel_ui():
@@ -5843,6 +5885,8 @@ if KIVY_AVAILABLE:
                         start_dl_btn.text = "SELECT AT LEAST 1 ITEM"
                         start_dl_btn.disabled = True
                         start_dl_btn.set_bg_color((0.25, 0.25, 0.30, 1.0))
+
+                update_sel_callback[0] = update_sel_ui
 
                 def on_item_toggle(item_idx, is_chk):
                     selected_map[item_idx] = is_chk
@@ -5964,9 +6008,12 @@ if KIVY_AVAILABLE:
             # Bottom Action Buttons
             btn_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(42))
 
+            btn_dl_label = "START DOWNLOAD"
+            if is_plist:
+                btn_dl_label = f"DOWNLOAD ALL ({total_entries} VIDEOS)" if not is_batch else f"DOWNLOAD ({total_entries} VIDEOS)"
             start_dl_btn = IconActionButton(
                 icon_path="download_arrow.png",
-                text=f"DOWNLOAD PLAYLIST ({total_entries} VIDEOS)" if is_plist else "START DOWNLOAD",
+                text=btn_dl_label,
                 bg_color=(1.0, 0.68, 0.0, 1.0),
                 text_color=(0.04, 0.05, 0.08, 1.0),
                 font_size="12sp",
@@ -5983,8 +6030,10 @@ if KIVY_AVAILABLE:
                     self.quality_spinner.text = fmt
 
                 chosen_indices = None
-                if is_plist and "selected_map" in locals():
+                if is_plist and selected_map:
                     chosen_indices = [k for k, v in selected_map.items() if v]
+                elif is_plist and entries:
+                    chosen_indices = list(range(len(entries)))
 
                 self.start_download(
                     target_url=target_url,
@@ -6044,15 +6093,25 @@ if KIVY_AVAILABLE:
                 self.update_status("[color=#00E676]Link loaded from clipboard![/color] Tap DOWNLOAD NOW.", 0)
 
         def on_paste_clicked(self, instance):
-            """Handle PASTE button press from Android system clipboard."""
+            """Handle PASTE button press from Android system clipboard with multi-URL detection."""
             try:
                 clip_text = Clipboard.paste()
                 if clip_text:
-                    normalized = normalize_youtube_url(clip_text.strip()) or clip_text.strip()
-                    self.url_input.text = normalized
+                    clean = clip_text.strip()
+                    self.url_input.text = clean
                     self.clipboard_banner.height = 0
                     self.clipboard_banner.opacity = 0.0
-                    self.update_status("[color=#FFB300]Link pasted![/color] Fetching video details...", 0)
+                    all_urls = extract_all_media_urls(clean)
+                    if len(all_urls) > 1:
+                        self.update_status(f"[color=#FFB300]{len(all_urls)} Links Pasted![/color] Ready for batch download.", 0)
+                        self.load_batch_preview(all_urls, auto_open_modal=True)
+                    elif all_urls:
+                        self.update_status("[color=#FFB300]Link pasted![/color] Fetching media details...", 0)
+                        self.fetch_preview(all_urls[0], auto_open_modal=True)
+                    else:
+                        normalized = normalize_youtube_url(clean) or clean
+                        self.update_status("[color=#FFB300]Link pasted![/color] Fetching media details...", 0)
+                        self.fetch_preview(normalized, auto_open_modal=True)
                 else:
                     self.update_status("Clipboard is empty.", 0)
             except Exception as e:
@@ -6072,12 +6131,68 @@ if KIVY_AVAILABLE:
             self.populate_home_recommendations()
 
         def on_url_input_changed(self, instance, text):
-            """Trigger real-time preview when user pastes or edits a valid YouTube link."""
+            """Trigger real-time preview when user pastes or edits a valid YouTube / media link or batch links."""
             clean = text.strip()
-            normalized = normalize_youtube_url(clean)
-            if normalized and normalized != self.current_preview_url:
-                self.current_preview_url = normalized
-                self.fetch_preview(normalized, auto_open_modal=False)
+            all_urls = extract_all_media_urls(clean)
+            if len(all_urls) > 1:
+                if clean != self.current_preview_url:
+                    self.current_preview_url = clean
+                    self.load_batch_preview(all_urls, auto_open_modal=False)
+            elif all_urls:
+                normalized = all_urls[0]
+                if normalized and normalized != self.current_preview_url:
+                    self.current_preview_url = normalized
+                    self.fetch_preview(normalized, auto_open_modal=False)
+            else:
+                normalized = normalize_youtube_url(clean)
+                if normalized and normalized != self.current_preview_url:
+                    self.current_preview_url = normalized
+                    self.fetch_preview(normalized, auto_open_modal=False)
+
+        def load_batch_preview(self, urls: List[str], auto_open_modal: bool = False):
+            """Prepare preview and multi-select queue when multiple video URLs are provided."""
+            count = len(urls)
+            entries = []
+            for i, u in enumerate(urls, start=1):
+                cand_id = ""
+                m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/|live/)([a-zA-Z0-9_-]{11})", u)
+                if m:
+                    cand_id = m.group(1)
+                thumb = f"https://i.ytimg.com/vi/{cand_id}/mqdefault.jpg" if cand_id else ""
+                title = f"Video #{i} ({cand_id})" if cand_id else f"Video #{i}"
+                entries.append({
+                    "id": cand_id,
+                    "title": title,
+                    "url": u,
+                    "duration": "Media",
+                    "thumbnail": thumb,
+                    "uploader": "Multi-URL Batch",
+                })
+            first_thumb = entries[0]["thumbnail"] if entries and entries[0]["thumbnail"] else ""
+            self.current_preview_info = {
+                "title": f"Batch: {count} Videos",
+                "url": urls[0],
+                "all_urls": urls,
+                "thumb": first_thumb,
+                "channel": "Batch Download",
+                "uploader": "Multi-URL Batch",
+                "duration": f"{count} Videos",
+                "duration_seconds": 0.0,
+                "is_playlist": True,
+                "is_batch": True,
+                "count": count,
+                "entries": entries,
+                "platform": "Batch",
+                "formats": [],
+            }
+            self.update_preview_ui(
+                f"Batch: {count} Videos Detected",
+                f"{count} links ready • Tap DOWNLOAD to choose format",
+                first_thumb,
+                f"DOWNLOAD ALL ({count} VIDEOS)"
+            )
+            if auto_open_modal:
+                Clock.schedule_once(lambda dt: self.open_download_modal(self.current_preview_info), 0.15)
 
         def fetch_preview(self, url: str, auto_open_modal: bool = False):
             """Fetch video or playlist thumbnail and details in a background thread with multi-platform support."""
@@ -6091,9 +6206,10 @@ if KIVY_AVAILABLE:
                         "extract_flat": "in_playlist",
                         "skip_download": True,
                         "logger": safe_logger,
-                        "socket_timeout": 18,
+                        "socket_timeout": 45,
                         "quiet": True,
                         "no_warnings": True,
+                        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
                     }
 
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -6151,22 +6267,24 @@ if KIVY_AVAILABLE:
                 except Exception as e:
                     print(f"[Preview] Fetch notice: {e}")
                     plat = detect_media_platform(url)
+                    is_pl = "playlist" in url.lower() or "list=" in url.lower()
                     self.current_preview_info = {
-                        "title": f"{plat} Media",
+                        "title": f"{plat} Playlist" if is_pl else f"{plat} Media",
                         "url": url,
                         "thumb": "",
                         "channel": plat,
                         "uploader": plat,
-                        "duration": "Media",
+                        "duration": "Playlist" if is_pl else "Media",
                         "duration_seconds": 0.0,
-                        "is_playlist": "playlist" in url.lower() or "list=" in url.lower(),
+                        "is_playlist": is_pl,
                         "count": 1,
                         "entries": [],
                         "platform": plat,
                         "formats": [],
                     }
+                    btn_text = "DOWNLOAD PLAYLIST" if is_pl else "DOWNLOAD NOW"
                     Clock.schedule_once(
-                        lambda dt: self.update_preview_ui(f"{plat} Media", "Ready to download", "", "DOWNLOAD NOW")
+                        lambda dt, b=btn_text: self.update_preview_ui(f"{plat} Playlist" if is_pl else f"{plat} Media", "Ready to download", "", b)
                     )
                     if auto_open_modal:
                         Clock.schedule_once(lambda dt: self.open_download_modal(self.current_preview_info), 0.2)
@@ -7842,11 +7960,11 @@ if KIVY_AVAILABLE:
                     is_turbo = getattr(self, "turbo_mode", True)
                     base_ydl_opts = {
                         "windowsfilenames": True,
-                        "trim_file_name": 215,
+                        "trim_file_name": 160,
                         "paths": {"home": str(target_dir), "temp": str(target_dir)},
                         "progress_hooks": [progress_hook],
                         "logger": safe_logger,
-                        "socket_timeout": 35,
+                        "socket_timeout": 45,
                         "nocheckcertificate": False,
                         "quiet": True,
                         "no_warnings": True,
@@ -7854,9 +7972,10 @@ if KIVY_AVAILABLE:
                         "nooverwrites": False,
                         "continuedl": True,
                         "noplaylist": True,
-                        "concurrent_fragment_downloads": 8 if is_turbo else 3,
-                        "buffersize": 2097152 if is_turbo else 524288,
-                        "http_chunk_size": 20971520 if is_turbo else 5242880,
+                        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+                        "concurrent_fragment_downloads": 4 if is_turbo else 2,
+                        "buffersize": 1048576 if is_turbo else 524288,
+                        "http_chunk_size": 10485760 if is_turbo else 5242880,
                     }
 
                     if ffmpeg_path:
@@ -7883,26 +8002,31 @@ if KIVY_AVAILABLE:
                     active_entries = []
                     if entries:
                         active_entries = list(entries)
-                    else:
+                    elif is_playlist or ("playlist" in url.lower() or "list=" in url.lower()):
                         flat_opts = {
                             "extract_flat": "in_playlist",
                             "skip_download": True,
                             "logger": safe_logger,
-                            "socket_timeout": 25,
+                            "socket_timeout": 45,
                             "quiet": True,
                             "no_warnings": True,
+                            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
                         }
-                        with yt_dlp.YoutubeDL(flat_opts) as flat_ydl:
-                            media_meta = flat_ydl.extract_info(url, download=False)
-                            if not media_meta:
-                                raise RuntimeError("Could not retrieve media details.")
-                            is_pl = media_meta.get("_type") == "playlist" or "entries" in media_meta
-                            raw_list = list(media_meta.get("entries") or []) if is_pl else [media_meta]
-                            active_entries = [e for e in raw_list if e]
+                        try:
+                            with yt_dlp.YoutubeDL(flat_opts) as flat_ydl:
+                                media_meta = flat_ydl.extract_info(url, download=False)
+                                if media_meta:
+                                    is_pl = media_meta.get("_type") == "playlist" or "entries" in media_meta
+                                    raw_list = list(media_meta.get("entries") or []) if is_pl else [media_meta]
+                                    active_entries = [e for e in raw_list if e]
+                        except Exception as flat_err:
+                            print(f"[Playlist Flat Extract] Error: {flat_err}")
 
-                    # Filter to selected indices if provided (Feature 1)
-                    if selected_indices is not None and len(selected_indices) > 0:
+                    # Filter to selected indices if provided
+                    if selected_indices is not None and len(selected_indices) > 0 and active_entries:
                         active_entries = [active_entries[i] for i in selected_indices if i < len(active_entries)]
+                    elif not active_entries:
+                        active_entries = [{"url": url, "id": "", "title": "Media Download"}]
 
                     total_count = len(active_entries) if active_entries else 1
                     current_item_meta["total"] = total_count
@@ -7933,6 +8057,11 @@ if KIVY_AVAILABLE:
                                         break
 
                         item_url = get_canonical_video_url(item, fallback_url=url)
+                        if not item_id and ("playlist" in item_url.lower() or not item_url.startswith("http")):
+                            print(f"[Queue] Skipping item #{idx} ({raw_item_title}) - no valid video target.")
+                            skipped_count += 1
+                            continue
+
                         item_thumb = item.get("thumbnail") or (f"https://i.ytimg.com/vi/{item_id}/hqdefault.jpg" if item_id else None)
                         item_uploader = item.get("uploader") or item.get("channel") or plat
 
@@ -7950,9 +8079,15 @@ if KIVY_AVAILABLE:
 
                         item_opts = dict(base_ydl_opts)
                         if total_count > 1:
-                            item_opts["outtmpl"] = str(target_dir / f"[{idx:02d}] %(title)s.%(ext)s")
+                            if item_id:
+                                item_opts["outtmpl"] = str(target_dir / f"[{idx:02d}] %(title).140s [%(id)s].%(ext)s")
+                            else:
+                                item_opts["outtmpl"] = str(target_dir / f"[{idx:02d}] %(title).150s.%(ext)s")
                         else:
-                            item_opts["outtmpl"] = str(target_dir / "%(title)s.%(ext)s")
+                            if item_id:
+                                item_opts["outtmpl"] = str(target_dir / "%(title).160s [%(id)s].%(ext)s")
+                            else:
+                                item_opts["outtmpl"] = str(target_dir / "%(title).170s.%(ext)s")
 
                         try:
                             with yt_dlp.YoutubeDL(item_opts) as ydl:
@@ -8101,20 +8236,42 @@ if KIVY_AVAILABLE:
                                     print(f"[Fallback] Notice: {fb_err}")
 
                         if not saved_path and "requested_downloads" in info and info["requested_downloads"]:
-                            fp = info["requested_downloads"][0].get("filepath")
-                            if fp and Path(fp).is_file():
-                                saved_path = Path(fp)
+                            for rd in info["requested_downloads"]:
+                                fp = rd.get("filepath")
+                                if fp and Path(fp).is_file():
+                                    saved_path = Path(fp)
+                                    break
 
                         if not saved_path:
                             try:
-                                prepared = ydl.prepare_filename(info)
-                                if Path(prepared).is_file():
-                                    saved_path = Path(prepared)
+                                prepared = Path(ydl.prepare_filename(info))
+                                if prepared.is_file():
+                                    saved_path = prepared
+                                else:
+                                    for ext in (".mp3", ".m4a", ".mp4", ".mkv", ".webm", ".opus"):
+                                        cand = prepared.with_suffix(ext)
+                                        if cand.is_file():
+                                            saved_path = cand
+                                            break
                             except Exception:
                                 pass
 
+                        if not saved_path and total_count > 1:
+                            idx_prefix = f"[{idx:02d}]"
+                            candidates = sorted(
+                                [c for c in target_dir.glob(f"{idx_prefix}*") if c.is_file() and not c.name.endswith((".part", ".ytdl", ".temp"))],
+                                key=lambda f: f.stat().st_mtime,
+                                reverse=True,
+                            )
+                            if candidates:
+                                saved_path = candidates[0]
+
                         if not saved_path and item_id:
-                            candidates = [c for c in target_dir.glob(f"*{item_id}*") if c.is_file()]
+                            candidates = sorted(
+                                [c for c in target_dir.glob(f"*{item_id}*") if c.is_file() and not c.name.endswith((".part", ".ytdl", ".temp"))],
+                                key=lambda f: f.stat().st_mtime,
+                                reverse=True,
+                            )
                             if candidates:
                                 saved_path = candidates[0]
 
@@ -8153,6 +8310,9 @@ if KIVY_AVAILABLE:
                                 embed_audio_metadata(saved_path, raw_item_title, item_uploader, item_thumb)
                             scan_media_file(saved_path)
                             saved_files.append(saved_path)
+
+                        if total_count > 1 and idx < total_count:
+                            time.sleep(0.4)
 
                     if saved_files:
                         last_file = saved_files[-1]
@@ -8265,11 +8425,12 @@ if KIVY_AVAILABLE:
                             if next_req.get("url") and hasattr(self, "url_input"):
                                 self.url_input.text = next_req["url"]
                             Clock.schedule_once(
-                                lambda dt: self.start_download(
-                                    chosen_format=next_req.get("chosen_format"),
-                                    is_playlist=next_req.get("is_playlist", False),
-                                    selected_indices=next_req.get("selected_indices"),
-                                    entries=next_req.get("entries"),
+                                lambda dt, nr=next_req: self.start_download(
+                                    target_url=nr.get("url"),
+                                    chosen_format=nr.get("chosen_format"),
+                                    is_playlist=nr.get("is_playlist", False),
+                                    selected_indices=nr.get("selected_indices"),
+                                    entries=nr.get("entries"),
                                 ),
                                 0.25
                             )

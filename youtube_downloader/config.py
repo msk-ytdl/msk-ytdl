@@ -55,6 +55,9 @@ class AppConfig:
 
 def get_config_dir() -> Path:
     """Return the application configuration directory path."""
+    custom_dir = os.environ.get("MSK_YTDL_CONFIG_DIR")
+    if custom_dir:
+        return Path(custom_dir).resolve()
     return Path.home() / CONFIG_DIR_NAME
 
 
