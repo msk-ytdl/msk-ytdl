@@ -1278,6 +1278,49 @@ def detect_real_audio_extension(audio_path: Path) -> str:
     return audio_path.suffix.lower()
 
 
+def is_network_interruption_error(err: Union[str, Exception]) -> bool:
+    """Check if an error string or exception represents a transient network drop or disconnection."""
+    if not err:
+        return False
+    msg = str(err).lower()
+    patterns = [
+        "network is unreachable",
+        "connection reset",
+        "connection refused",
+        "connection timed out",
+        "connection aborted",
+        "timed out",
+        "timeout",
+        "socket timeout",
+        "socket.timeout",
+        "remotedisconnected",
+        "broken pipe",
+        "name or service not known",
+        "nodename nor servname provided",
+        "failed to establish a new connection",
+        "temporary failure in name resolution",
+        "getaddrinfo failed",
+        "no route to host",
+        "sslv3_alert_handshake_failure",
+        "unexpected eof",
+        "incompleteread",
+        "read error",
+        "errno 104",  # ECONNRESET
+        "errno 110",  # ETIMEDOUT
+        "errno 111",  # ECONNREFUSED
+        "errno 113",  # EHOSTUNREACH
+        "errno 10053",  # WSAECONNABORTED
+        "errno 10054",  # WSAECONNRESET
+        "errno 10060",  # WSAETIMEDOUT
+        "http error 502",
+        "http error 503",
+        "http error 504",
+        "gateway timeout",
+        "bad gateway",
+    ]
+    return any(p in msg for p in patterns)
+
+
 def get_ydl_format_selector(selected_format: str, has_ffmpeg: bool = False) -> str:
     """
     Generate the precise yt-dlp format selector string based on user's chosen quality/audio option.
@@ -2636,6 +2679,7 @@ class AndroidNotificationManager:
         self._init_done = False
         self._current_media_title = ""
         self._is_media_playing = False
+        self._media_session = None
 
     def _init_android(self) -> bool:
         if self._init_done:
@@ -2670,6 +2714,15 @@ class AndroidNotificationManager:
                 except Exception:
                     pass
                 self.manager.createNotificationChannel(media_channel)
+
+            # Android MediaSession setup for lock screen & system playback controls (API 21+)
+            if Build_VERSION.SDK_INT >= 21 and not self._media_session:
+                try:
+                    MediaSession = autoclass("android.media.session.MediaSession")
+                    self._media_session = MediaSession(self.context, "MSK_MediaSession")
+                    self._media_session.setActive(True)
+                except Exception as mse:
+                    print(f"[MediaSession] Init notice: {mse}")
 
             self._init_done = True
             return True
@@ -2719,8 +2772,18 @@ class AndroidNotificationManager:
         except Exception:
             pass
 
-    def show_media_playback(self, title: str, is_playing: bool = True, media_type: str = "Audio"):
-        """Display media playback status in the Android notification bar with return-to-app action."""
+    def show_media_playback(
+        self,
+        title: str,
+        is_playing: bool = True,
+        media_type: str = "Song",
+        artist: str = "MSK YTDL",
+        album: str = "Downloaded Songs",
+        duration_ms: int = 0,
+        position_ms: int = 0,
+        thumb_path: Optional[str] = None,
+    ):
+        """Display media playback status in the Android notification bar & lock screen with interactive playback controls."""
         self._current_media_title = title
         self._is_media_playing = is_playing
         try:
@@ -2742,7 +2805,7 @@ class AndroidNotificationManager:
                 builder = NotificationBuilder(self.context)
 
             clean_title = safe_display_text(title)
-            state_text = f"▶ Playing • MSK {media_type} Player" if is_playing else f"⏸ Paused • MSK {media_type} Player"
+            state_text = f"▶ Playing • {safe_display_text(artist)}" if is_playing else f"⏸ Paused • {safe_display_text(artist)}"
 
             builder.setContentTitle(clean_title)
             builder.setContentText(state_text)
@@ -2756,28 +2819,92 @@ class AndroidNotificationManager:
             except Exception:
                 pass
 
+            flags = 0x08000000  # FLAG_UPDATE_CURRENT
+            if Build_VERSION.SDK_INT >= 23:
+                flags |= 0x04000000  # FLAG_IMMUTABLE
+
             # Tap notification in drawer to bring app back to the front
             try:
                 app_intent = Intent(self.context, PythonActivity)
                 app_intent.setAction(Intent.ACTION_MAIN)
                 app_intent.addCategory(Intent.CATEGORY_LAUNCHER)
                 app_intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-
-                flags = 0x08000000  # FLAG_UPDATE_CURRENT
-                if Build_VERSION.SDK_INT >= 23:
-                    flags |= 0x04000000  # FLAG_IMMUTABLE
-
                 pending_intent = PendingIntent.getActivity(self.context, 0, app_intent, flags)
                 builder.setContentIntent(pending_intent)
             except Exception as pe:
                 print(f"[Notification] PendingIntent notice: {pe}")
 
-            # MediaStyle if available
+            # 1. Update MediaSession state & metadata for lock screen & system controls
+            if self._media_session:
+                try:
+                    PlaybackStateBuilder = autoclass("android.media.session.PlaybackState$Builder")
+                    PlaybackState = autoclass("android.media.session.PlaybackState")
+                    pb_builder = PlaybackStateBuilder()
+                    state_val = PlaybackState.STATE_PLAYING if is_playing else PlaybackState.STATE_PAUSED
+                    transport_actions = (
+                        PlaybackState.ACTION_PLAY |
+                        PlaybackState.ACTION_PAUSE |
+                        PlaybackState.ACTION_PLAY_PAUSE |
+                        PlaybackState.ACTION_SKIP_TO_NEXT |
+                        PlaybackState.ACTION_SKIP_TO_PREVIOUS |
+                        PlaybackState.ACTION_STOP
+                    )
+                    pb_builder.setActions(transport_actions)
+                    pb_builder.setState(state_val, int(position_ms), 1.0)
+                    self._media_session.setPlaybackState(pb_builder.build())
+
+                    MediaMetadataBuilder = autoclass("android.media.MediaMetadata$Builder")
+                    MediaMetadata = autoclass("android.media.MediaMetadata")
+                    mm_builder = MediaMetadataBuilder()
+                    mm_builder.putString(MediaMetadata.METADATA_KEY_TITLE, clean_title)
+                    mm_builder.putString(MediaMetadata.METADATA_KEY_ARTIST, safe_display_text(artist or "MSK YTDL"))
+                    mm_builder.putString(MediaMetadata.METADATA_KEY_ALBUM, safe_display_text(album or "Downloaded Songs"))
+                    if duration_ms > 0:
+                        mm_builder.putLong(MediaMetadata.METADATA_KEY_DURATION, int(duration_ms))
+
+                    if thumb_path and os.path.exists(str(thumb_path)):
+                        try:
+                            BitmapFactory = autoclass("android.graphics.BitmapFactory")
+                            bmp = BitmapFactory.decodeFile(str(thumb_path))
+                            if bmp:
+                                mm_builder.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, bmp)
+                                mm_builder.putBitmap(MediaMetadata.METADATA_KEY_ART, bmp)
+                                builder.setLargeIcon(bmp)
+                        except Exception as b_err:
+                            print(f"[MediaSession] Art notice: {b_err}")
+
+                    self._media_session.setMetadata(mm_builder.build())
+                except Exception as ms_err:
+                    print(f"[MediaSession] Update notice: {ms_err}")
+
+            # 2. Add interactive Lock Screen & Notification Control Actions: Previous, Play/Pause, Next
+            try:
+                def make_control_intent(action_name: str, req_code: int):
+                    act_intent = Intent(self.context, PythonActivity)
+                    act_intent.setAction(action_name)
+                    act_intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    return PendingIntent.getActivity(self.context, req_code, act_intent, flags)
+
+                prev_intent = make_control_intent("org.msk.ytdl.ACTION_PREVIOUS", 101)
+                play_intent = make_control_intent("org.msk.ytdl.ACTION_PLAY_PAUSE", 102)
+                next_intent = make_control_intent("org.msk.ytdl.ACTION_NEXT", 103)
+
+                builder.addAction(0, "⏮ Prev", prev_intent)
+                builder.addAction(0, "⏸ Pause" if is_playing else "▶ Play", play_intent)
+                builder.addAction(0, "⏭ Next", next_intent)
+            except Exception as act_err:
+                print(f"[Notification] Action buttons notice: {act_err}")
+
+            # 3. MediaStyle linked to MediaSession
             try:
                 MediaStyle = autoclass("android.app.Notification$MediaStyle")
-                builder.setStyle(MediaStyle())
-            except Exception:
-                pass
+                style = MediaStyle()
+                if self._media_session:
+                    style.setMediaSession(self._media_session.getSessionToken())
+                style.setShowActionsInCompactView([0, 1, 2])
+                builder.setStyle(style)
+            except Exception as st_err:
+                print(f"[Notification] MediaStyle notice: {st_err}")
 
             self.manager.notify(self.media_notification_id, builder.build())
         except Exception as e:
@@ -2787,10 +2914,22 @@ class AndroidNotificationManager:
         """Dismiss media playback notification when playback is stopped or closed."""
         self._is_media_playing = False
         try:
+            if self._media_session:
+                try:
+                    from jnius import autoclass
+                    PlaybackStateBuilder = autoclass("android.media.session.PlaybackState$Builder")
+                    PlaybackState = autoclass("android.media.session.PlaybackState")
+                    pb_builder = PlaybackStateBuilder()
+                    pb_builder.setState(PlaybackState.STATE_STOPPED, 0, 0.0)
+                    self._media_session.setPlaybackState(pb_builder.build())
+                except Exception:
+                    pass
             if self._init_android() and self.manager:
                 self.manager.cancel(self.media_notification_id)
         except Exception:
             pass
+
+    dismiss_media_playback = hide_media_playback
 
 
 _GLOBAL_NOTIFICATION_MANAGER: Optional[AndroidNotificationManager] = None
@@ -3352,9 +3491,13 @@ if KIVY_AVAILABLE:
             return True
 
         def on_resume(self):
-            """Sync state and refresh offline library when returning to app."""
+            """Sync state, refresh offline library, and periodically check for updates when returning to app."""
             if hasattr(self, "refresh_library"):
                 self.refresh_library()
+            last_check = getattr(self, "_last_update_check_time", 0)
+            if time.time() - last_check > 14400:  # 4 hours
+                self._last_update_check_time = time.time()
+                Clock.schedule_once(lambda dt: self.check_for_updates(user_triggered=False), 3.0)
 
         def get_media_search_dirs(self) -> List[Path]:
             """Return candidate public directories to scan for downloaded media (excluding vault)."""
@@ -3972,6 +4115,21 @@ if KIVY_AVAILABLE:
             )
             self.clipboard_banner.bind(on_press=self.on_clipboard_banner_clicked)
             content.add_widget(self.clipboard_banner)
+
+            # GitHub Auto-Update Available Banner
+            self.update_banner = Button(
+                text="🚀 New Update Available! Tap to install",
+                font_size="11.5sp",
+                bold=True,
+                size_hint_y=None,
+                height=0,
+                opacity=0,
+                background_color=(0.0, 0.85, 0.40, 1.0),
+                color=(0.04, 0.06, 0.10, 1.0),
+            )
+            self.update_banner_data = {}
+            self.update_banner.bind(on_press=self.on_update_banner_clicked)
+            content.add_widget(self.update_banner)
 
             # Multi-Platform Quick Selector Bar (Feature 2)
             plat_scroll = ScrollView(do_scroll_x=True, do_scroll_y=False, size_hint_y=None, height=dp(34))
@@ -6282,6 +6440,20 @@ if KIVY_AVAILABLE:
                 self.clipboard_banner.opacity = 0.0
                 self.update_status("[color=#00E676]Link loaded from clipboard![/color] Tap DOWNLOAD NOW.", 0)
 
+        def on_update_banner_clicked(self, instance):
+            """User tapped the update available banner; open update modal."""
+            data = getattr(self, "update_banner_data", {})
+            if data:
+                self.open_update_modal(
+                    new_version=data.get("tag", "latest"),
+                    release_title=data.get("title", f"MSK YTDL v{data.get('tag', '')}"),
+                    changelog=data.get("body", "Bug fixes and performance improvements."),
+                    download_url=data.get("html_url", "https://github.com/msk-ytdl/msk-ytdl/releases"),
+                    apk_url=data.get("apk_url"),
+                )
+            else:
+                self.check_for_updates(user_triggered=True)
+
         def on_paste_clicked(self, instance):
             """Handle PASTE button press from Android system clipboard with multi-URL detection."""
             try:
@@ -6568,6 +6740,22 @@ if KIVY_AVAILABLE:
                             self.update_status(
                                 "[color=#00E676]Received YouTube link![/color] Tap DOWNLOAD NOW.", 0
                             )
+                            return
+
+                # Case 3: MediaSession Lock Screen & Notification Control Actions
+                action_str = str(action) if action else ""
+                if action_str == "org.msk.ytdl.ACTION_PLAY_PAUSE":
+                    self.toggle_audio_playback()
+                    return
+                elif action_str == "org.msk.ytdl.ACTION_NEXT":
+                    self.play_next_audio()
+                    return
+                elif action_str == "org.msk.ytdl.ACTION_PREVIOUS":
+                    self.play_prev_audio()
+                    return
+                elif action_str == "org.msk.ytdl.ACTION_STOP":
+                    self.close_mini_player()
+                    return
             except Exception as e:
                 print(f"[Android] handle_intent_payload error: {e}")
 
@@ -7625,8 +7813,10 @@ if KIVY_AVAILABLE:
 
             self.current_sound.play()
 
-            # Show Media Notification in Android notification bar
-            self.notification_manager.show_media_playback(clean_t, is_playing=True, media_type="Song")
+            # Show Media Notification in Android notification bar & lock screen
+            dur_ms = int((getattr(self.current_sound, "length", 0) or 0) * 1000)
+            pos_ms = int((getattr(self.current_sound, "get_pos", lambda: 0)() or 0) * 1000)
+            self.notification_manager.show_media_playback(clean_t, is_playing=True, media_type="Song", duration_ms=dur_ms, position_ms=pos_ms)
 
             if not self.player_clock_event:
                 self.player_clock_event = Clock.schedule_interval(self._update_player_progress, 0.4)
@@ -7636,18 +7826,20 @@ if KIVY_AVAILABLE:
             if not self.current_sound:
                 return
             track_title = safe_display_text(get_vault_display_name(self.current_track_path) if self.current_track_path else "Song Track")
+            dur_ms = int((getattr(self.current_sound, "length", 0) or 0) * 1000)
+            pos_ms = int((getattr(self.current_sound, "get_pos", lambda: 0)() or 0) * 1000)
             if self.current_sound.state == "play":
                 self.current_sound.stop()
                 self.is_audio_playing = False
                 self.mini_player_play_btn.set_icon("play.png")
                 self.mini_player_play_btn.set_bg_color([0.10, 0.55, 0.28, 1.0])
-                self.notification_manager.show_media_playback(track_title, is_playing=False, media_type="Song")
+                self.notification_manager.show_media_playback(track_title, is_playing=False, media_type="Song", duration_ms=dur_ms, position_ms=pos_ms)
             else:
                 self.current_sound.play()
                 self.is_audio_playing = True
                 self.mini_player_play_btn.set_icon("pause.png")
                 self.mini_player_play_btn.set_bg_color([1.0, 0.72, 0.0, 1.0])
-                self.notification_manager.show_media_playback(track_title, is_playing=True, media_type="Song")
+                self.notification_manager.show_media_playback(track_title, is_playing=True, media_type="Song", duration_ms=dur_ms, position_ms=pos_ms)
 
         def play_next_audio(self):
             """Play next audio track in library queue."""
@@ -7715,7 +7907,7 @@ if KIVY_AVAILABLE:
                     self.play_next_audio()
 
         def check_for_updates(self, user_triggered: bool = True):
-            """Query GitHub Releases API for new updates and display modal if newer version found."""
+            """Query GitHub for new updates (API + Raw Pyproject fallback) and notify user."""
             if user_triggered:
                 self.update_status("Checking GitHub for app updates...", 25)
 
@@ -7723,39 +7915,120 @@ if KIVY_AVAILABLE:
                 try:
                     import urllib.request
                     import json
-                    api_url = "https://api.github.com/repos/msk-ytdl/msk-ytdl/releases/latest"
-                    req = urllib.request.Request(
-                        api_url,
-                        headers={"User-Agent": "MSK-YTDL-App", "Accept": "application/vnd.github.v3+json"},
-                    )
-                    with urllib.request.urlopen(req, timeout=8) as resp:
-                        if resp.status == 200:
-                            data = json.loads(resp.read().decode("utf-8"))
-                            tag = data.get("tag_name", "").lstrip("v")
-                            curr_ver = get_app_version()
+                    tag = ""
+                    release_name = ""
+                    body = ""
+                    html_url = "https://github.com/msk-ytdl/msk-ytdl/releases"
+                    apk_url = None
 
-                            if is_version_newer(curr_ver, tag):
+                    headers = {"User-Agent": "MSK-YTDL-App", "Accept": "application/vnd.github.v3+json"}
+
+                    # Step 1: Try latest release endpoint
+                    try:
+                        api_url = "https://api.github.com/repos/msk-ytdl/msk-ytdl/releases/latest"
+                        req = urllib.request.Request(api_url, headers=headers)
+                        with urllib.request.urlopen(req, timeout=7) as resp:
+                            if resp.status == 200:
+                                data = json.loads(resp.read().decode("utf-8"))
+                                tag = data.get("tag_name", "").lstrip("v")
                                 release_name = data.get("name") or f"MSK YTDL v{tag}"
                                 body = data.get("body") or "New release with performance enhancements and bug fixes."
-                                html_url = data.get("html_url") or "https://github.com/msk-ytdl/msk-ytdl/releases"
-                                apk_url = None
+                                html_url = data.get("html_url") or html_url
                                 for asset in data.get("assets", []):
                                     if asset.get("name", "").endswith(".apk"):
                                         apk_url = asset.get("browser_download_url")
                                         break
-                                Clock.schedule_once(
-                                    lambda dt: self.open_update_modal(tag, release_name, body, html_url, apk_url=apk_url)
-                                )
-                                Clock.schedule_once(
-                                    lambda dt: self.update_status(f"[color=#00E676]New Update Available:[/color] v{tag}", 100)
-                                )
-                            else:
-                                if user_triggered:
-                                    Clock.schedule_once(
-                                        lambda dt: self.update_status(f"[color=#00E676]Up to date![/color] (v{curr_ver} is latest)", 100)
-                                    )
+                    except Exception as e1:
+                        print(f"[UpdateChecker] Step 1 latest release notice: {e1}")
+
+                    # Step 2: Try all releases if latest release endpoint 404/empty
+                    if not tag:
+                        try:
+                            rel_url = "https://api.github.com/repos/msk-ytdl/msk-ytdl/releases"
+                            req = urllib.request.Request(rel_url, headers=headers)
+                            with urllib.request.urlopen(req, timeout=7) as resp:
+                                if resp.status == 200:
+                                    rels = json.loads(resp.read().decode("utf-8"))
+                                    if rels and isinstance(rels, list):
+                                        data = rels[0]
+                                        tag = data.get("tag_name", "").lstrip("v")
+                                        release_name = data.get("name") or f"MSK YTDL v{tag}"
+                                        body = data.get("body") or "New release with bug fixes and updates."
+                                        html_url = data.get("html_url") or html_url
+                                        for asset in data.get("assets", []):
+                                            if asset.get("name", "").endswith(".apk"):
+                                                apk_url = asset.get("browser_download_url")
+                                                break
+                        except Exception as e2:
+                            print(f"[UpdateChecker] Step 2 releases list notice: {e2}")
+
+                    # Step 3: Try tags if releases was empty
+                    if not tag:
+                        try:
+                            tags_url = "https://api.github.com/repos/msk-ytdl/msk-ytdl/tags"
+                            req = urllib.request.Request(tags_url, headers=headers)
+                            with urllib.request.urlopen(req, timeout=7) as resp:
+                                if resp.status == 200:
+                                    tag_list = json.loads(resp.read().decode("utf-8"))
+                                    if tag_list and isinstance(tag_list, list):
+                                        tag = tag_list[0].get("name", "").lstrip("v")
+                                        release_name = f"MSK YTDL v{tag}"
+                                        body = f"Update v{tag} is now available on GitHub."
+                        except Exception as e3:
+                            print(f"[UpdateChecker] Step 3 tags notice: {e3}")
+
+                    # Step 4: Fallback to raw pyproject.toml (never rate-limited by GitHub API)
+                    if not tag:
+                        try:
+                            raw_url = "https://raw.githubusercontent.com/msk-ytdl/msk-ytdl/main/pyproject.toml"
+                            req = urllib.request.Request(raw_url, headers={"User-Agent": "MSK-YTDL-App"})
+                            with urllib.request.urlopen(req, timeout=7) as resp:
+                                if resp.status == 200:
+                                    raw_text = resp.read().decode("utf-8")
+                                    m = re.search(r'version\s*=\s*["\']([^"\']+)["\']', raw_text)
+                                    if m:
+                                        tag = m.group(1).lstrip("v")
+                                        release_name = f"MSK YTDL v{tag}"
+                                        body = "New version detected on GitHub with latest improvements."
+                        except Exception as e4:
+                            print(f"[UpdateChecker] Step 4 raw pyproject notice: {e4}")
+
+                    curr_ver = get_app_version()
+
+                    if tag and is_version_newer(curr_ver, tag):
+                        # Cache banner data
+                        self.update_banner_data = {
+                            "tag": tag,
+                            "title": release_name,
+                            "body": body,
+                            "html_url": html_url,
+                            "apk_url": apk_url,
+                        }
+
+                        # Display banner on Home view
+                        def show_banner(t=tag):
+                            if hasattr(self, "update_banner") and self.update_banner:
+                                self.update_banner.text = f"🚀 New Update Available: v{t} • Tap to Install"
+                                self.update_banner.height = dp(38)
+                                self.update_banner.opacity = 1.0
+
+                        Clock.schedule_once(lambda dt: show_banner())
+                        Clock.schedule_once(
+                            lambda dt, t=tag: self.update_status(f"[color=#00E676]New Update Available:[/color] v{t}", 100)
+                        )
+
+                        # If user manually tapped Check Updates, open the modal immediately
+                        if user_triggered:
+                            Clock.schedule_once(
+                                lambda dt: self.open_update_modal(tag, release_name, body, html_url, apk_url=apk_url)
+                            )
+                    else:
+                        if user_triggered:
+                            Clock.schedule_once(
+                                lambda dt: self.update_status(f"[color=#00E676]Up to date![/color] (v{curr_ver} is latest)", 100)
+                            )
                 except Exception as e:
-                    print(f"[UpdateChecker] Notice: {e}")
+                    print(f"[UpdateChecker] Error: {e}")
                     if user_triggered:
                         Clock.schedule_once(
                             lambda dt: self.update_status("[color=#FFB300]Update check skipped: network unavailable[/color]", 0)
@@ -8155,6 +8428,13 @@ if KIVY_AVAILABLE:
                         "progress_hooks": [progress_hook],
                         "logger": safe_logger,
                         "socket_timeout": 45,
+                        "retries": 15,
+                        "fragment_retries": 15,
+                        "file_access_retries": 5,
+                        "retry_sleep_functions": {
+                            "http": lambda n: min(2 ** n, 10),
+                            "fragment": lambda n: min(2 ** n, 10),
+                        },
                         "nocheckcertificate": False,
                         "quiet": True,
                         "no_warnings": True,
@@ -8279,42 +8559,78 @@ if KIVY_AVAILABLE:
                             else:
                                 item_opts["outtmpl"] = str(target_dir / "%(title).170s.%(ext)s")
 
-                        try:
-                            with yt_dlp.YoutubeDL(item_opts) as ydl:
-                                info = ydl.extract_info(item_url, download=True)
-                        except DownloadCancelledException:
-                            raise
-                        except Exception as dl_err:
-                            err_str = str(dl_err)
-                            if "File name too long" in err_str or "Errno 36" in err_str:
-                                print(f"[Download] Retrying with clean short filename due to: {err_str}")
-                                fallback_opts = dict(item_opts)
-                                fallback_opts["outtmpl"] = str(target_dir / "%(title).180s.%(ext)s")
-                                with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
-                                    info = ydl_fb.extract_info(item_url, download=True)
-                            elif "ffmpeg" in err_str.lower() or "postprocessing" in err_str.lower():
-                                print(f"[Download] FFmpeg notice: {err_str}. Retrying with direct stream...")
-                                fallback_opts = dict(item_opts)
-                                fallback_opts.pop("allow_unplayable_formats", None)
-                                fallback_opts.pop("ffmpeg_location", None)
-                                fallback_opts.pop("postprocessors", None)
-                                if is_audio:
-                                    fallback_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio[acodec!=none]/bestaudio/ba/b[acodec!=none]"
-                                else:
-                                    fallback_opts["format"] = "best[height<=1080][vcodec!=none][acodec!=none]/best[height<=720][vcodec!=none][acodec!=none]/22/best[vcodec!=none][acodec!=none]/18/best"
-                                with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
-                                    info = ydl_fb.extract_info(item_url, download=True)
-                            elif total_count > 1:
-                                print(f"[Queue] Skipping item #{idx} ({raw_item_title}) due to: {dl_err}")
-                                skipped_count += 1
-                                Clock.schedule_once(
-                                    lambda dt, i=idx, tot=total_count: self.update_status(
-                                        f"[color=#FFA000]Skipped unplayable item {i}/{tot}[/color]", int((i / tot) * 100)
-                                    )
-                                )
-                                continue
-                            else:
+                        max_net_retries = 5
+                        net_attempt = 0
+                        info = None
+
+                        while True:
+                            try:
+                                with yt_dlp.YoutubeDL(item_opts) as ydl:
+                                    info = ydl.extract_info(item_url, download=True)
+                                break
+                            except DownloadCancelledException:
                                 raise
+                            except Exception as dl_err:
+                                if self.download_state.get("cancel_requested"):
+                                    raise DownloadCancelledException("Download cancelled by user.")
+
+                                # Auto-Resume on Network Interruption
+                                if is_network_interruption_error(dl_err):
+                                    net_attempt += 1
+                                    if net_attempt <= max_net_retries:
+                                        backoff_sec = min(2 ** net_attempt, 16)
+                                        print(f"[Auto-Resume] Network interrupted ({dl_err}). Resuming attempt {net_attempt}/{max_net_retries} in {backoff_sec}s...")
+                                        Clock.schedule_once(
+                                            lambda dt, att=net_attempt, mx=max_net_retries, sec=backoff_sec: self.update_status(
+                                                f"[color=#FFA000]Network interrupted. Auto-resuming ({att}/{mx}) in {sec}s...[/color]",
+                                                self.download_state.get("percent", 0)
+                                            )
+                                        )
+                                        self.notification_manager.show_progress(
+                                            f"Network reconnecting ({net_attempt}/{max_net_retries})...",
+                                            self.download_state.get("percent", 0)
+                                        )
+                                        for _ in range(int(backoff_sec * 2)):
+                                            if self.download_state.get("cancel_requested"):
+                                                raise DownloadCancelledException("Download cancelled by user.")
+                                            time.sleep(0.5)
+                                        continue
+                                    else:
+                                        print(f"[Auto-Resume] Exceeded {max_net_retries} network retries for item #{idx}.")
+
+                                err_str = str(dl_err)
+                                if "File name too long" in err_str or "Errno 36" in err_str:
+                                    print(f"[Download] Retrying with clean short filename due to: {err_str}")
+                                    fallback_opts = dict(item_opts)
+                                    fallback_opts["outtmpl"] = str(target_dir / "%(title).180s.%(ext)s")
+                                    with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
+                                        info = ydl_fb.extract_info(item_url, download=True)
+                                    break
+                                elif "ffmpeg" in err_str.lower() or "postprocessing" in err_str.lower():
+                                    print(f"[Download] FFmpeg notice: {err_str}. Retrying with direct stream...")
+                                    fallback_opts = dict(item_opts)
+                                    fallback_opts.pop("allow_unplayable_formats", None)
+                                    fallback_opts.pop("ffmpeg_location", None)
+                                    fallback_opts.pop("postprocessors", None)
+                                    if is_audio:
+                                        fallback_opts["format"] = "140/bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio[acodec!=none]/bestaudio/ba/b[acodec!=none]"
+                                    else:
+                                        fallback_opts["format"] = "best[height<=1080][vcodec!=none][acodec!=none]/best[height<=720][vcodec!=none][acodec!=none]/22/best[vcodec!=none][acodec!=none]/18/best"
+                                    with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
+                                        info = ydl_fb.extract_info(item_url, download=True)
+                                    break
+                                elif total_count > 1:
+                                    print(f"[Queue] Skipping item #{idx} ({raw_item_title}) due to: {dl_err}")
+                                    skipped_count += 1
+                                    Clock.schedule_once(
+                                        lambda dt, i=idx, tot=total_count: self.update_status(
+                                            f"[color=#FFA000]Skipped unplayable item {i}/{tot}[/color]", int((i / tot) * 100)
+                                        )
+                                    )
+                                    info = None
+                                    break
+                                else:
+                                    raise
 
                         if not info:
                             continue

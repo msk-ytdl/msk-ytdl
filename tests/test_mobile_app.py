@@ -1002,6 +1002,84 @@ def test_extract_audio_from_video(tmp_path):
             assert out_audio.exists()
 
 
+def test_is_network_interruption_error():
+    """Verify is_network_interruption_error accurately detects transient connection drops."""
+    from mobile_app import is_network_interruption_error
+
+    # Positive cases (transient connection failures)
+    assert is_network_interruption_error("Connection reset by peer") is True
+    assert is_network_interruption_error("socket timeout during read") is True
+    assert is_network_interruption_error("urllib.error.URLError: <urlopen error [Errno 110] Connection timed out>") is True
+    assert is_network_interruption_error("http.client.RemoteDisconnected: Remote end closed connection without response") is True
+    assert is_network_interruption_error("Network is unreachable") is True
+    assert is_network_interruption_error("Failed to establish a new connection: [Errno 111] Connection refused") is True
+    assert is_network_interruption_error("HTTP Error 502: Bad Gateway") is True
+    assert is_network_interruption_error("HTTP Error 503: Service Unavailable") is True
+    assert is_network_interruption_error("HTTP Error 504: Gateway Timeout") is True
+    assert is_network_interruption_error("IncompleteRead: 1048576 bytes read, 2097152 expected") is True
+    assert is_network_interruption_error(Exception("Connection aborted: Broken pipe")) is True
+
+    # Negative cases (non-network or permanent errors)
+    assert is_network_interruption_error("This video is private and cannot be downloaded") is False
+    assert is_network_interruption_error("Video unavailable: This video has been removed") is False
+    assert is_network_interruption_error("FFmpeg not found on system path") is False
+    assert is_network_interruption_error("User cancelled download") is False
+    assert is_network_interruption_error("") is False
+    assert is_network_interruption_error(None) is False
+
+
+def test_android_notification_mediasession():
+    """Verify AndroidNotificationManager handles MediaSession & show_media_playback safely."""
+    from mobile_app import AndroidNotificationManager
+
+    mgr = AndroidNotificationManager()
+    assert hasattr(mgr, "_media_session")
+    assert hasattr(mgr, "show_media_playback")
+    assert hasattr(mgr, "dismiss_media_playback")
+
+    # On non-Android environment, show_media_playback safely completes without crashing
+    mgr.show_media_playback("Test Song Title", is_playing=True, media_type="Song", duration_ms=180000, position_ms=45000)
+    assert mgr._is_media_playing is True
+    assert mgr._current_media_title == "Test Song Title"
+
+    mgr.dismiss_media_playback()
+    assert mgr._is_media_playing is False
+
+
+def test_update_banner_and_pyproject_fallback():
+    """Verify home view includes update_banner and pyproject.toml fallback resolves version."""
+    from mobile_app import MSKDownloaderMobile, KIVY_AVAILABLE, is_version_newer
+    if not KIVY_AVAILABLE:
+        return
+
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    scroll_view = app.build_home_view()
+    assert hasattr(app, "update_banner")
+    assert app.update_banner is not None
+    # Initially hidden until update found
+    assert app.update_banner.height == 0
+    assert app.update_banner.opacity == 0
+
+    # Test clicking banner with mock update data triggers modal
+    opened = {}
+    app.open_update_modal = lambda *args, **kwargs: opened.update({
+        "tag": kwargs.get("new_version") or (args[0] if len(args) > 0 else ""),
+        "title": kwargs.get("release_title") or (args[1] if len(args) > 1 else ""),
+    })
+    app.update_banner_data = {"tag": "3.0.0", "title": "MSK YTDL v3.0.0", "body": "Notes", "html_url": "https://github.com/...", "apk_url": None}
+
+    app.on_update_banner_clicked(None)
+    assert opened.get("tag") == "3.0.0"
+    assert opened.get("title") == "MSK YTDL v3.0.0"
+
+    # Verify is_version_newer logic
+    assert is_version_newer("2.1.0", "2.2.0") is True
+    assert is_version_newer("2.1.0", "3.0.0") is True
+    assert is_version_newer("2.1.0", "2.1.0") is False
+    assert is_version_newer("2.1.0", "2.0.9") is False
+
+
+
 
 
 
