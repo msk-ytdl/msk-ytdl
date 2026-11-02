@@ -216,7 +216,7 @@ class YoutubeDownloader:
             "concurrent_fragment_downloads": 6,
             "buffersize": 1048576,
             "http_chunk_size": 10485760,
-            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+            "extractor_args": {"youtube": {"player_client": ["ios", "android", "web"]}},
         }
 
         # Configure FFmpeg location if bundled or found
@@ -600,7 +600,7 @@ class YoutubeDownloader:
             "logger": logger,
             "socket_timeout": 45,
             "js_runtimes": {"deno": {}, "node": {}},
-            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+            "extractor_args": {"youtube": {"player_client": ["ios", "android", "web"]}},
         }
 
         try:

@@ -946,6 +946,63 @@ def test_load_batch_preview():
     assert app.current_preview_info["entries"][2]["id"] == "video333333"
 
 
+def test_detect_real_audio_extension(tmp_path):
+    """Verify detecting actual audio container format from magic bytes."""
+    from mobile_app import detect_real_audio_extension
+
+    # WebM / Matroska (Opus)
+    f_webm = tmp_path / "song.webm"
+    f_webm.write_bytes(b"\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01\x42\xf7\x81\x01\x42\xf2")
+    assert detect_real_audio_extension(f_webm) == ".opus"
+
+    # Ogg container
+    f_ogg = tmp_path / "song.ogg"
+    f_ogg.write_bytes(b"OggS\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+    assert detect_real_audio_extension(f_ogg) == ".opus"
+
+    # MP3 with ID3 header
+    f_mp3_id3 = tmp_path / "song1.mp3"
+    f_mp3_id3.write_bytes(b"ID3\x04\x00\x00\x00\x00\x00\x20\x00\x00\x00\x00")
+    assert detect_real_audio_extension(f_mp3_id3) == ".mp3"
+
+    # MP3 raw frame sync
+    f_mp3_sync = tmp_path / "song2.mp3"
+    f_mp3_sync.write_bytes(b"\xff\xfb\x90\x64\x00\x00\x00\x00\x00\x00\x00\x00")
+    assert detect_real_audio_extension(f_mp3_sync) == ".mp3"
+
+    # M4A / MP4 ISO header
+    f_m4a = tmp_path / "song.m4a"
+    f_m4a.write_bytes(b"\x00\x00\x00\x20ftypM4A \x00\x00\x00\x00M4A mp42isom")
+    assert detect_real_audio_extension(f_m4a) == ".m4a"
+
+
+def test_extract_audio_from_video(tmp_path):
+    """Verify extract_audio_from_video safety with missing and mocked files."""
+    from mobile_app import extract_audio_from_video
+    from pathlib import Path
+
+    # Missing file safely returns False
+    assert extract_audio_from_video(Path("non_existent_video.mp4"), tmp_path / "out.m4a") is False
+
+    # Mocked ffmpeg run
+    dummy_in = tmp_path / "input.mp4"
+    dummy_in.write_bytes(b"fake mp4 video bytes" * 100)
+    out_audio = tmp_path / "extracted.m4a"
+
+    with patch("mobile_app.find_ffmpeg_binary", return_value="ffmpeg"):
+        with patch("subprocess.run") as mock_sub:
+            def fake_run(cmd, **kwargs):
+                out_audio.write_bytes(b"fake audio stream" * 100)
+                class Result:
+                    returncode = 0
+                return Result()
+            mock_sub.side_effect = fake_run
+            res = extract_audio_from_video(dummy_in, out_audio)
+            assert res is True
+            assert out_audio.exists()
+
+
+
 
 
 
