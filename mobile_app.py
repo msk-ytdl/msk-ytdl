@@ -428,20 +428,41 @@ def install_apk_file(apk_path: Union[str, Path]) -> bool:
         file_obj = File(str(apk_path.resolve()))
         intent = Intent(Intent.ACTION_VIEW)
 
+        # Disable StrictMode file URI exposure checks on Android 7+ (API 24 through 35)
+        try:
+            StrictMode = autoclass("android.os.StrictMode")
+            VmPolicyBuilder = autoclass("android.os.StrictMode$VmPolicy$Builder")
+            StrictMode.setVmPolicy(VmPolicyBuilder().build())
+        except Exception as sm_err:
+            print(f"[StrictMode] VmPolicy notice: {sm_err}")
+
+        # Check Android 8.0+ (API 26+) unknown app install permission
+        if Build.VERSION.SDK_INT >= 26:
+            try:
+                pm = activity.getPackageManager()
+                if hasattr(pm, "canRequestPackageInstalls") and not pm.canRequestPackageInstalls():
+                    Settings = autoclass("android.provider.Settings")
+                    manage_intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+                    manage_intent.setData(Uri.parse(f"package:{activity.getPackageName()}"))
+                    manage_intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    activity.startActivity(manage_intent)
+            except Exception as pe:
+                print(f"[AutoUpdate] Unknown source permission notice: {pe}")
+
+        uri = None
         if Build.VERSION.SDK_INT >= 24:
             try:
                 FileProvider = autoclass("androidx.core.content.FileProvider")
                 package_name = activity.getPackageName()
                 uri = FileProvider.getUriForFile(activity, f"{package_name}.fileprovider", file_obj)
-                intent.setDataAndType(uri, "application/vnd.android.package-archive")
-                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             except Exception:
-                uri = Uri.fromFile(file_obj)
-                intent.setDataAndType(uri, "application/vnd.android.package-archive")
-        else:
-            uri = Uri.fromFile(file_obj)
-            intent.setDataAndType(uri, "application/vnd.android.package-archive")
+                uri = None
 
+        if not uri:
+            uri = Uri.fromFile(file_obj)
+
+        intent.setDataAndType(uri, "application/vnd.android.package-archive")
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         activity.startActivity(intent)
         return True
@@ -3984,9 +4005,13 @@ if KIVY_AVAILABLE:
             body_layout.add_widget(about_card)
 
             # Section 5: Software Updates (Feature 6)
-            update_card = StyledCard(orientation="vertical", padding=[dp(12), dp(10)], spacing=dp(6), size_hint_y=None, height=dp(86), bg_color=(0.11, 0.13, 0.20, 1.0))
+            cached_update = getattr(self, "update_banner_data", {})
+            has_pending = bool(cached_update and cached_update.get("tag"))
+            tag_name = cached_update.get("tag", "") if has_pending else ""
+
+            update_card = StyledCard(orientation="vertical", padding=[dp(12), dp(10)], spacing=dp(6), size_hint_y=None, height=dp(90), bg_color=(0.11, 0.13, 0.20, 1.0))
             up_lbl = Label(
-                text="[b]Software Updates[/b]\n[size=10.5sp][color=#90CAF9]Check GitHub releases for latest features & fixes[/color][/size]",
+                text=f"[b]Software Updates[/b]\n[size=10.5sp][color=#90CAF9]Installed: v{app_ver} • Check GitHub for updates[/color][/size]",
                 markup=True,
                 font_size="12sp",
                 halign="left",
@@ -3997,17 +4022,57 @@ if KIVY_AVAILABLE:
             update_card.add_widget(up_lbl)
 
             chk_up_btn = IconActionButton(
-                icon_path="settings.png",
-                text="CHECK FOR UPDATES",
+                icon_path="download_arrow.png" if has_pending else "settings.png",
+                text=f"⚡ UPDATE NOW (v{tag_name})" if has_pending else "CHECK FOR UPDATES",
                 font_size="11.5sp",
                 size_hint_y=None,
-                height=dp(34),
-                bg_color=(0.20, 0.28, 0.44, 1.0),
+                height=dp(36),
+                bg_color=(0.10, 0.65, 0.30, 1.0) if has_pending else (0.20, 0.28, 0.44, 1.0),
                 text_color=(1, 1, 1, 1),
             )
             def on_chk_updates_pressed(ins):
-                modal.dismiss()
-                self.check_for_updates(user_triggered=True)
+                cur_cache = getattr(self, "update_banner_data", {})
+                if cur_cache and cur_cache.get("tag"):
+                    modal.dismiss()
+                    self.open_update_modal(
+                        new_version=cur_cache.get("tag", "latest"),
+                        release_title=cur_cache.get("title", f"MSK YTDL v{cur_cache.get('tag', '')}"),
+                        changelog=cur_cache.get("body", "Bug fixes and performance improvements."),
+                        download_url=cur_cache.get("html_url", "https://github.com/msk-ytdl/msk-ytdl/releases"),
+                        apk_url=cur_cache.get("apk_url"),
+                    )
+                    return
+
+                chk_up_btn.disabled = True
+                chk_up_btn.set_text("CHECKING GITHUB...")
+
+                def on_feedback(res_type: str, msg: str, new_t: str = ""):
+                    if res_type == "update_available":
+                        chk_up_btn.set_text(f"⚡ UPDATE NOW (v{new_t})")
+                        chk_up_btn.set_bg_color([0.10, 0.65, 0.30, 1.0])
+                        chk_up_btn.disabled = False
+                        modal.dismiss()
+                    elif res_type == "up_to_date":
+                        chk_up_btn.set_text(f"✓ UP TO DATE (v{app_ver})")
+                        chk_up_btn.set_bg_color([0.15, 0.45, 0.25, 1.0])
+                        chk_up_btn.disabled = False
+                        self.show_info_modal(
+                            "App is Up to Date",
+                            f"You are running MSK YTDL v{app_ver}.\nNo newer release found on GitHub.",
+                        )
+                    else:
+                        chk_up_btn.set_text("🌐 OPEN GITHUB (OFFLINE)")
+                        chk_up_btn.set_bg_color([0.50, 0.30, 0.15, 1.0])
+                        chk_up_btn.disabled = False
+                        self.show_info_modal(
+                            "Network Notice",
+                            "Could not connect to GitHub.\nTap below to check in your browser.",
+                            btn_text="OPEN IN BROWSER",
+                            on_btn_press=lambda: open_web_url("https://github.com/msk-ytdl/msk-ytdl/releases"),
+                        )
+
+                self.check_for_updates(user_triggered=True, feedback_cb=on_feedback)
+
             chk_up_btn.bind(on_press=on_chk_updates_pressed)
             update_card.add_widget(chk_up_btn)
             body_layout.add_widget(update_card)
@@ -6389,6 +6454,7 @@ if KIVY_AVAILABLE:
                     is_playlist=is_plist,
                     selected_indices=chosen_indices,
                     entries=entries if is_plist and entries else None,
+                    media_title=media_item.get("title") if media_item else None,
                 )
 
             start_dl_btn.bind(on_press=on_start_clicked)
@@ -7906,7 +7972,60 @@ if KIVY_AVAILABLE:
                 if length > 0 and pos >= (length - 1.0):
                     self.play_next_audio()
 
-        def check_for_updates(self, user_triggered: bool = True):
+        def show_info_modal(self, title: str, message: str, btn_text: str = "OK", on_btn_press=None):
+            """Display a clean information alert modal dialog."""
+            modal = ModalView(size_hint=(0.88, 0.32), auto_dismiss=True)
+            card = StyledCard(
+                orientation="vertical",
+                padding=[dp(16), dp(14)],
+                spacing=dp(10),
+                bg_color=(0.10, 0.12, 0.18, 0.98),
+                radius=14,
+            )
+            card.add_widget(
+                Label(
+                    text=f"[b]{safe_display_text(title)}[/b]",
+                    markup=True,
+                    font_size="14sp",
+                    color=(1.0, 0.72, 0.0, 1.0),
+                    size_hint_y=None,
+                    height=dp(24),
+                    halign="center",
+                )
+            )
+            msg_lbl = Label(
+                text=safe_display_text(message),
+                markup=True,
+                font_size="11.5sp",
+                color=(0.85, 0.88, 0.95, 1.0),
+                size_hint_y=1.0,
+                halign="center",
+                valign="middle",
+            )
+            msg_lbl.bind(size=msg_lbl.setter("text_size"))
+            card.add_widget(msg_lbl)
+
+            btn = Button(
+                text=btn_text,
+                font_size="12sp",
+                bold=True,
+                size_hint_y=None,
+                height=dp(38),
+                background_color=(0.10, 0.60, 0.28, 1.0),
+                color=(1, 1, 1, 1),
+            )
+            def do_click(ins):
+                modal.dismiss()
+                if on_btn_press:
+                    on_btn_press()
+            btn.bind(on_press=do_click)
+            card.add_widget(btn)
+
+            modal.add_widget(card)
+            modal.open()
+            return modal
+
+        def check_for_updates(self, user_triggered: bool = True, feedback_cb=None):
             """Query GitHub for new updates (API + Raw Pyproject fallback) and notify user."""
             if user_triggered:
                 self.update_status("Checking GitHub for app updates...", 25)
@@ -7915,6 +8034,8 @@ if KIVY_AVAILABLE:
                 try:
                     import urllib.request
                     import json
+                    import ssl
+                    ssl_ctx = ssl._create_unverified_context() if hasattr(ssl, "_create_unverified_context") else None
                     tag = ""
                     release_name = ""
                     body = ""
@@ -7927,7 +8048,7 @@ if KIVY_AVAILABLE:
                     try:
                         api_url = "https://api.github.com/repos/msk-ytdl/msk-ytdl/releases/latest"
                         req = urllib.request.Request(api_url, headers=headers)
-                        with urllib.request.urlopen(req, timeout=7) as resp:
+                        with urllib.request.urlopen(req, context=ssl_ctx, timeout=7) as resp:
                             if resp.status == 200:
                                 data = json.loads(resp.read().decode("utf-8"))
                                 tag = data.get("tag_name", "").lstrip("v")
@@ -7946,7 +8067,7 @@ if KIVY_AVAILABLE:
                         try:
                             rel_url = "https://api.github.com/repos/msk-ytdl/msk-ytdl/releases"
                             req = urllib.request.Request(rel_url, headers=headers)
-                            with urllib.request.urlopen(req, timeout=7) as resp:
+                            with urllib.request.urlopen(req, context=ssl_ctx, timeout=7) as resp:
                                 if resp.status == 200:
                                     rels = json.loads(resp.read().decode("utf-8"))
                                     if rels and isinstance(rels, list):
@@ -7967,7 +8088,7 @@ if KIVY_AVAILABLE:
                         try:
                             tags_url = "https://api.github.com/repos/msk-ytdl/msk-ytdl/tags"
                             req = urllib.request.Request(tags_url, headers=headers)
-                            with urllib.request.urlopen(req, timeout=7) as resp:
+                            with urllib.request.urlopen(req, context=ssl_ctx, timeout=7) as resp:
                                 if resp.status == 200:
                                     tag_list = json.loads(resp.read().decode("utf-8"))
                                     if tag_list and isinstance(tag_list, list):
@@ -7982,7 +8103,7 @@ if KIVY_AVAILABLE:
                         try:
                             raw_url = "https://raw.githubusercontent.com/msk-ytdl/msk-ytdl/main/pyproject.toml"
                             req = urllib.request.Request(raw_url, headers={"User-Agent": "MSK-YTDL-App"})
-                            with urllib.request.urlopen(req, timeout=7) as resp:
+                            with urllib.request.urlopen(req, context=ssl_ctx, timeout=7) as resp:
                                 if resp.status == 200:
                                     raw_text = resp.read().decode("utf-8")
                                     m = re.search(r'version\s*=\s*["\']([^"\']+)["\']', raw_text)
@@ -7992,6 +8113,9 @@ if KIVY_AVAILABLE:
                                         body = "New version detected on GitHub with latest improvements."
                         except Exception as e4:
                             print(f"[UpdateChecker] Step 4 raw pyproject notice: {e4}")
+
+                    if tag and not apk_url:
+                        apk_url = f"https://github.com/msk-ytdl/msk-ytdl/releases/download/v{tag}/MSK-YTDL.apk"
 
                     curr_ver = get_app_version()
 
@@ -8017,19 +8141,44 @@ if KIVY_AVAILABLE:
                             lambda dt, t=tag: self.update_status(f"[color=#00E676]New Update Available:[/color] v{t}", 100)
                         )
 
-                        # If user manually tapped Check Updates, open the modal immediately
+                        if feedback_cb:
+                            Clock.schedule_once(
+                                lambda dt, t=tag: feedback_cb("update_available", f"Update v{t} available!", t)
+                            )
                         if user_triggered:
                             Clock.schedule_once(
                                 lambda dt: self.open_update_modal(tag, release_name, body, html_url, apk_url=apk_url)
                             )
                     else:
-                        if user_triggered:
+                        if feedback_cb:
+                            Clock.schedule_once(
+                                lambda dt: feedback_cb("up_to_date", f"Up to date (v{curr_ver})", tag or curr_ver)
+                            )
+                        elif user_triggered:
+                            Clock.schedule_once(
+                                lambda dt: self.show_info_modal(
+                                    "App is Up to Date",
+                                    f"You are running MSK YTDL v{curr_ver}.\nNo newer release found on GitHub.",
+                                )
+                            )
                             Clock.schedule_once(
                                 lambda dt: self.update_status(f"[color=#00E676]Up to date![/color] (v{curr_ver} is latest)", 100)
                             )
                 except Exception as e:
                     print(f"[UpdateChecker] Error: {e}")
-                    if user_triggered:
+                    if feedback_cb:
+                        Clock.schedule_once(
+                            lambda dt: feedback_cb("error", "Network check failed", "")
+                        )
+                    elif user_triggered:
+                        Clock.schedule_once(
+                            lambda dt: self.show_info_modal(
+                                "Network Notice",
+                                "Could not connect to GitHub.\nTap below to check in your browser.",
+                                btn_text="OPEN IN BROWSER",
+                                on_btn_press=lambda: open_web_url("https://github.com/msk-ytdl/msk-ytdl/releases"),
+                            )
+                        )
                         Clock.schedule_once(
                             lambda dt: self.update_status("[color=#FFB300]Update check skipped: network unavailable[/color]", 0)
                         )
@@ -8153,6 +8302,8 @@ if KIVY_AVAILABLE:
             btn_col = BoxLayout(orientation="vertical", spacing=dp(6), size_hint_y=None, height=dp(86))
 
             target_apk_url = apk_url or (download_url if download_url.endswith(".apk") else None)
+            if not target_apk_url and new_version:
+                target_apk_url = f"https://github.com/msk-ytdl/msk-ytdl/releases/download/v{new_version}/MSK-YTDL.apk"
             download_state = {"downloaded_file": None, "is_downloading": False}
 
             auto_dl_btn = IconActionButton(
@@ -8186,14 +8337,33 @@ if KIVY_AVAILABLE:
                 def download_worker():
                     try:
                         import urllib.request
+                        import ssl
+                        ssl_ctx = ssl._create_unverified_context() if hasattr(ssl, "_create_unverified_context") else None
                         dest_dir = get_android_download_dir()
                         apk_dest = dest_dir / f"MSK_YTDL_v{new_version}.apk"
+
+                        # Ensure dest_dir is writable or fallback to app-specific directory
+                        try:
+                            t_test = dest_dir / ".msk_wtest"
+                            t_test.write_text("ok")
+                            t_test.unlink(missing_ok=True)
+                        except Exception:
+                            if is_running_on_android():
+                                try:
+                                    from jnius import autoclass
+                                    PythonActivity = autoclass("org.kivy.android.PythonActivity")
+                                    ctx_act = PythonActivity.mActivity
+                                    ext_d = ctx_act.getExternalFilesDir(None)
+                                    if ext_d:
+                                        apk_dest = Path(ext_d.getAbsolutePath()) / f"MSK_YTDL_v{new_version}.apk"
+                                except Exception:
+                                    pass
 
                         req = urllib.request.Request(
                             target_apk_url,
                             headers={"User-Agent": "MSK-YTDL-App", "Accept": "*/*"}
                         )
-                        with urllib.request.urlopen(req, timeout=30) as response:
+                        with urllib.request.urlopen(req, context=ssl_ctx, timeout=35) as response:
                             total_bytes = int(response.headers.get("Content-Length", 0))
                             downloaded = 0
                             block_size = 65536
@@ -8282,6 +8452,7 @@ if KIVY_AVAILABLE:
             is_playlist: Optional[bool] = None,
             selected_indices: Optional[List[int]] = None,
             entries: Optional[List[Dict[str, Any]]] = None,
+            media_title: Optional[str] = None,
         ):
             """Validate inputs and launch background download thread with pause/cancel queue support."""
             url = target_url or self.url_input.text.strip()
@@ -8299,9 +8470,17 @@ if KIVY_AVAILABLE:
             is_audio = "Audio" in selected_format
             plat = detect_media_platform(url)
 
+            # Determine best initial display title
+            preview_title = (
+                media_title
+                or (self.current_preview_info.get("title") if hasattr(self, "current_preview_info") and self.current_preview_info and self.current_preview_info.get("url") == url else None)
+                or (self.preview_title.text if hasattr(self, "preview_title") and self.preview_title.text and self.preview_title.text != "Ready to Download" else None)
+                or (f"{plat} Song" if is_audio else f"{plat} Video")
+            )
+
             # Automated Download Queue: If download already in progress, enqueue request
             if self.download_state.get("is_active"):
-                q_title = self.title_input.text.strip() if hasattr(self, "title_input") and self.title_input.text.strip() else normalized
+                q_title = self.title_input.text.strip() if hasattr(self, "title_input") and self.title_input.text.strip() else preview_title
                 self.download_queue.append({
                     "chosen_format": chosen_format,
                     "is_playlist": is_playlist,
@@ -8321,7 +8500,7 @@ if KIVY_AVAILABLE:
             self.download_state["cancel_requested"] = False
             self.download_state["is_paused"] = False
             self.download_state["current_part_files"].clear()
-            init_title = self.title_input.text.strip() if hasattr(self, "title_input") and self.title_input.text.strip() else "Media Download"
+            init_title = self.title_input.text.strip() if hasattr(self, "title_input") and self.title_input.text.strip() else preview_title
             self.download_state["title"] = init_title
             self.download_state["format"] = selected_format
             self.download_state["percent"] = 5
@@ -8496,7 +8675,7 @@ if KIVY_AVAILABLE:
                     if selected_indices is not None and len(selected_indices) > 0 and active_entries:
                         active_entries = [active_entries[i] for i in selected_indices if i < len(active_entries)]
                     elif not active_entries:
-                        active_entries = [{"url": url, "id": "", "title": "Media Download"}]
+                        active_entries = [{"url": url, "id": "", "title": preview_title}]
 
                     total_count = len(active_entries) if active_entries else 1
                     current_item_meta["total"] = total_count
@@ -8515,8 +8694,8 @@ if KIVY_AVAILABLE:
                         if self.download_state.get("cancel_requested"):
                             raise DownloadCancelledException("Download cancelled by user.")
 
-                        raw_item_title = item.get("title") or f"Item {idx}"
-                        clean_title = sanitize_storage_filename(raw_item_title, f"Video_{idx}")
+                        raw_item_title = item.get("title") or preview_title or f"Item {idx}"
+                        clean_title = sanitize_storage_filename(raw_item_title, f"Audio_{idx}" if is_audio else f"Video_{idx}")
                         item_id = item.get("id") or ""
                         if not item_id:
                             for cand in (item.get("webpage_url"), item.get("url")):
@@ -8634,6 +8813,20 @@ if KIVY_AVAILABLE:
 
                         if not info:
                             continue
+
+                        # Extract real metadata from stream info so true song/video title is preserved
+                        real_title = info.get("title") or info.get("track")
+                        if real_title:
+                            raw_item_title = real_title
+                            clean_title = sanitize_storage_filename(raw_item_title, f"Audio_{idx}" if is_audio else f"Video_{idx}")
+                            current_item_meta["title"] = raw_item_title
+                            self.download_state["title"] = raw_item_title
+                        real_uploader = info.get("uploader") or info.get("artist") or info.get("channel")
+                        if real_uploader:
+                            item_uploader = real_uploader
+                        real_thumb = info.get("thumbnail")
+                        if real_thumb:
+                            item_thumb = real_thumb
 
                         saved_path: Optional[Path] = None
 
@@ -8968,6 +9161,7 @@ if KIVY_AVAILABLE:
                                     is_playlist=nr.get("is_playlist", False),
                                     selected_indices=nr.get("selected_indices"),
                                     entries=nr.get("entries"),
+                                    media_title=nr.get("title"),
                                 ),
                                 0.25
                             )

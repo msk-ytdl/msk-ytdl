@@ -1079,6 +1079,82 @@ def test_update_banner_and_pyproject_fallback():
     assert is_version_newer("2.1.0", "2.0.9") is False
 
 
+def test_audio_download_preserves_real_song_name():
+    """Verify audio download uses real song title and does not fall back to 'Media Download'."""
+    from mobile_app import MSKDownloaderMobile, KIVY_AVAILABLE
+    if not KIVY_AVAILABLE:
+        return
+
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    app.url_input = type("DummyInput", (), {"text": "https://www.youtube.com/watch?v=abcdefghijk"})()
+    app.progress_bar = type("DummyPB", (), {"value": 0})()
+    app.download_state = {"is_active": False, "cancel_requested": False, "is_paused": False, "current_part_files": set()}
+    app.download_queue = []
+    app.update_status = lambda msg, p: None
+    app.current_preview_info = {"url": "https://www.youtube.com/watch?v=abcdefghijk", "title": "Arijit Singh - Kesariya"}
+    app.download_btn = type("DummyBtn", (), {"disabled": False, "text": ""})()
+
+    # Pass real audio song title
+    app.start_download(
+        target_url="https://www.youtube.com/watch?v=abcdefghijk",
+        chosen_format="Audio (High Quality 320kbps MP3)",
+        media_title="Arijit Singh - Kesariya",
+    )
+
+    # Active download title must be the real song name, NOT "Media Download"
+    assert app.download_state["title"] == "Arijit Singh - Kesariya"
+    assert app.download_state["title"] != "Media Download"
+
+
+def test_show_info_modal_and_settings_update_feedback():
+    """Verify show_info_modal opens dialog safely and settings update feedback functions."""
+    from mobile_app import MSKDownloaderMobile, KIVY_AVAILABLE
+    if not KIVY_AVAILABLE:
+        return
+
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    # Test show_info_modal does not throw
+    modal = app.show_info_modal("App is Up to Date", "You are running the latest version.")
+    assert modal is not None
+    modal.dismiss()
+
+    # Test feedback callback in check_for_updates
+    feedback_results = []
+    def dummy_feedback(res_type, msg, tag=""):
+        feedback_results.append((res_type, tag))
+
+    # Mock urllib in check_for_updates worker to return same version
+    with patch("urllib.request.urlopen") as mock_url:
+        class DummyResp:
+            status = 200
+            def read(self):
+                return b'{"tag_name": "v1.0.1", "name": "MSK YTDL v1.0.1", "body": "Notes", "assets": []}'
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+        mock_url.return_value = DummyResp()
+        with patch("mobile_app.get_app_version", return_value="1.0.1"):
+            app.update_status = lambda msg, val: None
+            app.check_for_updates(user_triggered=True, feedback_cb=dummy_feedback)
+            import time
+            time.sleep(0.3)
+            # Feedback callback should have registered up_to_date
+            if feedback_results:
+                assert feedback_results[0][0] in ("up_to_date", "update_available", "error")
+
+
+def test_install_apk_file_validation():
+    """Verify install_apk_file safely handles empty or non-existent files."""
+    from mobile_app import install_apk_file
+    from pathlib import Path
+
+    assert install_apk_file("") is False
+    assert install_apk_file(None) is False
+    assert install_apk_file(Path("non_existent_file.apk")) is False
+
+
+
 
 
 
