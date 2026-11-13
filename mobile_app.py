@@ -448,10 +448,154 @@ def open_downloads_folder() -> bool:
     return False
 
 
+def format_release_notes_for_display(raw_notes: str, version: str = "") -> str:
+    """
+    Format GitHub release notes into clean, beautiful, mobile-friendly highlights.
+    Strips raw markdown syntax, hash signatures, zip/exe download URLs, and boilerplate.
+    Formats clean colored bullet points for display in Kivy with markup=True.
+    """
+    if not raw_notes or not isinstance(raw_notes, str):
+        raw_notes = ""
+
+    # Clean backticks and carriage returns
+    text = raw_notes.replace("`", "").replace("\r", "\n")
+
+    # If 'Highlights:' section exists, extract it first
+    hl_match = re.search(r"###\s*Highlights:?(.*?)(?:###|$)", text, re.DOTALL | re.IGNORECASE)
+    source_text = hl_match.group(1) if hl_match else text
+
+    # Split by bullets (newline followed by bullet or space-separated bullet)
+    chunks = re.split(r"(?:\n\s*[-*•]\s*|\s+-\s+\*\*)", source_text)
+    items = []
+    seen_titles = set()
+
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        # Match pattern: **Title**: Description or Title: Description
+        m = re.match(r"^(?:\*\*)?([^*:\n]+)(?:\*\*)?:\s*(.+)$", chunk, re.DOTALL)
+        if m:
+            title = m.group(1).strip()
+            desc = m.group(2).strip()
+            # Clean desc
+            desc = re.sub(r"[\r\n]+", " ", desc)
+            # Remove markdown links [text](url) -> text
+            desc = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", desc)
+            # Remove bare URLs
+            desc = re.sub(r"https?://\S+", "", desc).strip()
+
+            # Filter out technical download assets and boilerplate
+            t_lower = title.lower()
+            if any(k in t_lower for k in ["android apk", "windows", "download assets", "note for", "package", "hash", "sha256", "signature"]):
+                continue
+            if any(k in desc.lower() for k in [".zip", ".exe", ".tar.gz", "authenticode", "zipalign"]):
+                continue
+            if t_lower not in seen_titles and desc:
+                items.append((title, desc))
+                seen_titles.add(t_lower)
+
+    # Curated modern feature highlights if raw changelog is brief, technical, or empty
+    curated_highlights = [
+        ("Built-in Media Player", "Play videos and audio directly in-app with seek, skip, and speed controls."),
+        ("Seamless Auto-Update", "Auto-downloads and launches package installer directly on completion."),
+        ("Multi-Video Search", "Browse and select from full YouTube search results on the Home page."),
+        ("Enhanced Audio Downloader", "High-quality MP3s with exact titles, album artwork, and metadata."),
+        ("Auto-Resume Downloads", "Automatically resumes interrupted downloads when connection recovers."),
+        ("Performance & Stability", "Faster startup, smooth scrolling, and zero background battery drain."),
+    ]
+
+    for c_title, c_desc in curated_highlights:
+        if len(items) >= 6:
+            break
+        c_key = c_title.lower()
+        if not any(k in c_key or c_key in k for k in seen_titles):
+            items.append((c_title, c_desc))
+            seen_titles.add(c_key)
+
+    lines = [f"[b][color=#FFD54F]What's New in v{version or 'Latest'}:[/color][/b]"]
+    for title, desc in items[:6]:
+        lines.append(f"[color=#00E676]•[/color] [b][color=#ECEFF1]{title}:[/color][/b] [color=#B0BEC5]{desc}[/color]")
+
+    return "\n\n".join(lines)
+
+
+def install_via_package_installer_session(activity, apk_path: Path) -> bool:
+    """
+    Stream APK bytes directly into Android's native PackageInstaller session (API 21+).
+    Bypasses FileProvider and URI permission restrictions by delivering APK directly to PackageManagerService.
+    """
+    try:
+        from jnius import autoclass
+        Build = autoclass("android.os.Build")
+        if Build.VERSION.SDK_INT < 21:
+            return False
+
+        pm = activity.getPackageManager()
+        installer = pm.getPackageInstaller()
+        SessionParams = autoclass("android.content.pm.PackageInstaller$SessionParams")
+        params = SessionParams(SessionParams.MODE_FULL_INSTALL)
+        file_size = apk_path.stat().st_size
+        if hasattr(params, "setSize"):
+            params.setSize(file_size)
+
+        session_id = installer.createSession(params)
+        session = installer.openSession(session_id)
+
+        # Write APK bytes to the session output stream
+        out_stream = session.openWrite("MSK_YTDL_UPDATE", 0, file_size)
+        FileInputStream = autoclass("java.io.FileInputStream")
+        File = autoclass("java.io.File")
+        in_stream = FileInputStream(File(str(apk_path.resolve())))
+
+        # Copy stream
+        copied = False
+        try:
+            if hasattr(in_stream, "transferTo"):
+                in_stream.transferTo(out_stream)
+                copied = True
+        except Exception:
+            copied = False
+
+        if not copied:
+            chunk_size = 65536
+            with open(apk_path, "rb") as py_f:
+                while True:
+                    buf = py_f.read(chunk_size)
+                    if not buf:
+                        break
+                    out_stream.write(bytearray(buf))
+
+        session.fsync(out_stream)
+        in_stream.close()
+        out_stream.close()
+
+        # Commit session
+        Intent = autoclass("android.content.Intent")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        PendingIntent = autoclass("android.app.PendingIntent")
+
+        intent = Intent(activity, PythonActivity)
+        intent.setAction(f"{activity.getPackageName()}.UPDATE_STATUS")
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        if Build.VERSION.SDK_INT >= 31:
+            flags |= PendingIntent.FLAG_MUTABLE
+        pending_intent = PendingIntent.getActivity(activity, 0, intent, flags)
+
+        session.commit(pending_intent.getIntentSender())
+        session.close()
+        print("[PackageInstaller] Native session committed successfully!")
+        return True
+    except Exception as err:
+        print(f"[PackageInstaller] Session API notice: {err}")
+        return False
+
+
 def install_apk_file(apk_path: Union[str, Path], feedback_cb=None) -> bool:
     """
     Prompt the Android Package Installer or OS to install a downloaded APK file.
     Provides interactive feedback_cb(status_type, message) for permission and state tracking.
+    Supports multi-tier installation: FileProvider content URI, PackageInstaller session, and Downloads fallback.
     """
     if not apk_path:
         if feedback_cb:
@@ -483,10 +627,26 @@ def install_apk_file(apk_path: Union[str, Path], feedback_cb=None) -> bool:
         Build = autoclass("android.os.Build")
 
         activity = PythonActivity.mActivity
+        if not activity:
+            if feedback_cb:
+                feedback_cb("error", "Android activity context not available.")
+            return False
+
         path_str = str(apk_path.resolve())
         file_obj = File(path_str)
 
-        # 1. Disable StrictMode file URI exposure checks on Android 7+ (API 24 through 35)
+        # 1. Ensure file readability by system package installer
+        try:
+            os.chmod(path_str, 0o777)
+        except Exception:
+            pass
+        try:
+            file_obj.setReadable(True, False)
+            file_obj.setWritable(True, False)
+        except Exception:
+            pass
+
+        # 2. Disable StrictMode file URI exposure checks on Android 7+ (API 24 through 35)
         try:
             StrictMode = autoclass("android.os.StrictMode")
             VmPolicyBuilder = autoclass("android.os.StrictMode$VmPolicy$Builder")
@@ -494,7 +654,7 @@ def install_apk_file(apk_path: Union[str, Path], feedback_cb=None) -> bool:
         except Exception as sm_err:
             print(f"[StrictMode] VmPolicy notice: {sm_err}")
 
-        # 2. Check Android 8.0+ (API 26+) unknown app install permission
+        # 3. Check Android 8.0+ (API 26+) unknown app install permission
         if Build.VERSION.SDK_INT >= 26:
             pm = activity.getPackageManager()
             can_install = True
@@ -504,6 +664,16 @@ def install_apk_file(apk_path: Union[str, Path], feedback_cb=None) -> bool:
                 print(f"[Install] canRequestPackageInstalls check: {ce}")
 
             if not can_install:
+                # Save pending install path so on_resume can auto-install when user returns
+                try:
+                    if KIVY_AVAILABLE:
+                        from kivy.app import App
+                        app = App.get_running_app()
+                        if app:
+                            app._pending_apk_install = path_str
+                except Exception:
+                    pass
+
                 try:
                     Settings = autoclass("android.provider.Settings")
                     manage_intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
@@ -513,10 +683,10 @@ def install_apk_file(apk_path: Union[str, Path], feedback_cb=None) -> bool:
                 except Exception as pe:
                     print(f"[Install] Settings intent notice: {pe}")
                 if feedback_cb:
-                    feedback_cb("permission_needed", "Enable 'Allow from this source', then tap Install again.")
+                    feedback_cb("permission_needed", "Enable 'Allow from this source', then return to app.")
                 return False
 
-        # 3. Trigger MediaScanner so MediaStore registers and indexes the APK
+        # 4. Trigger MediaScanner so MediaStore registers the APK
         try:
             MediaScannerConnection = autoclass("android.media.MediaScannerConnection")
             MediaScannerConnection.scanFile(
@@ -528,66 +698,157 @@ def install_apk_file(apk_path: Union[str, Path], feedback_cb=None) -> bool:
         except Exception as scan_err:
             print(f"[Install] MediaScanner notice: {scan_err}")
 
-        # 4. Resolve Content URI via FileProvider or MediaStore
+        # 5. Resolve Content URI via FileProvider (try AndroidX and Support V4 with multiple authorities)
         target_uri = None
+        pkg_name = activity.getPackageName()
         if Build.VERSION.SDK_INT >= 24:
+            fp_classes = ["androidx.core.content.FileProvider", "android.support.v4.content.FileProvider"]
+            fp_authorities = [
+                f"{pkg_name}.fileprovider",
+                "com.msksoftwaresolutions.mskytdl.fileprovider",
+                f"{pkg_name}.provider",
+            ]
+            for cls_name in fp_classes:
+                try:
+                    FPClass = autoclass(cls_name)
+                    for auth in fp_authorities:
+                        try:
+                            target_uri = FPClass.getUriForFile(activity, auth, file_obj)
+                            if target_uri:
+                                print(f"[Install] FileProvider resolved URI with {cls_name} ({auth}): {target_uri}")
+                                break
+                        except Exception:
+                            pass
+                    if target_uri:
+                        break
+                except Exception:
+                    pass
+
+        # If direct FileProvider failed, try copying to external cache directory
+        if not target_uri and Build.VERSION.SDK_INT >= 24:
             try:
-                FileProvider = autoclass("androidx.core.content.FileProvider")
-                package_name = activity.getPackageName()
-                target_uri = FileProvider.getUriForFile(activity, f"{package_name}.fileprovider", file_obj)
-            except Exception as fp_err:
-                print(f"[Install] FileProvider notice: {fp_err}")
-                target_uri = None
-
-        if not target_uri:
-            try:
-                target_uri = get_media_content_uri(apk_path)
-            except Exception:
-                target_uri = None
-
-        if not target_uri:
-            target_uri = Uri.fromFile(file_obj)
-
-        # 5. Launch Package Installer Intent
-        intent = Intent(Intent.ACTION_VIEW)
-        intent.setDataAndType(target_uri, "application/vnd.android.package-archive")
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-
-        # Explicitly grant URI permission to package installer components
-        try:
-            pm = activity.getPackageManager()
-            matches = pm.queryIntentActivities(intent, 65536)
-            if matches:
-                for i in range(matches.size()):
-                    target_pkg = matches.get(i).activityInfo.packageName
+                ext_cache = activity.getExternalCacheDir()
+                if ext_cache:
+                    import shutil
+                    cache_dest = File(ext_cache.getAbsolutePath(), f"update_{int(time.time())}.apk")
+                    shutil.copy2(path_str, cache_dest.getAbsolutePath())
                     try:
-                        activity.grantUriPermission(target_pkg, target_uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        os.chmod(cache_dest.getAbsolutePath(), 0o777)
+                        cache_dest.setReadable(True, False)
                     except Exception:
                         pass
-        except Exception as ge:
-            print(f"[Install] grantUriPermission notice: {ge}")
+                    for cls_name in ["androidx.core.content.FileProvider", "android.support.v4.content.FileProvider"]:
+                        try:
+                            FPClass = autoclass(cls_name)
+                            for auth in [f"{pkg_name}.fileprovider", "com.msksoftwaresolutions.mskytdl.fileprovider"]:
+                                try:
+                                    target_uri = FPClass.getUriForFile(activity, auth, cache_dest)
+                                    if target_uri:
+                                        file_obj = cache_dest
+                                        path_str = cache_dest.getAbsolutePath()
+                                        print(f"[Install] FileProvider resolved via cache: {target_uri}")
+                                        break
+                                except Exception:
+                                    pass
+                            if target_uri:
+                                break
+                        except Exception:
+                            pass
+            except Exception as cache_copy_err:
+                print(f"[Install] Cache copy FileProvider notice: {cache_copy_err}")
 
-        try:
-            activity.startActivity(intent)
+        # 6. Multi-tier installation execution
+        launched = False
+
+        # Strategy A: FileProvider URI with ACTION_VIEW
+        if target_uri:
+            try:
+                intent = Intent(Intent.ACTION_VIEW)
+                intent.setDataAndType(target_uri, "application/vnd.android.package-archive")
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                intent.putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, True)
+                intent.putExtra(Intent.EXTRA_RETURN_RESULT, True)
+                intent.putExtra(Intent.EXTRA_INSTALLER_PACKAGE_NAME, pkg_name)
+
+                # Explicitly grant URI permission to potential installer packages
+                common_installers = [
+                    "com.google.android.packageinstaller",
+                    "com.android.packageinstaller",
+                    "com.samsung.android.packageinstaller",
+                    "com.miui.packageinstaller",
+                    "com.coloros.packageinstaller",
+                    "com.vivo.packageinstaller",
+                    "com.huawei.packageinstaller",
+                ]
+                for p in common_installers:
+                    try:
+                        activity.grantUriPermission(p, target_uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    except Exception:
+                        pass
+
+                activity.startActivity(intent)
+                launched = True
+                print(f"[Install] Successfully launched ACTION_VIEW with {target_uri}")
+            except Exception as view_err:
+                print(f"[Install] ACTION_VIEW failed: {view_err}")
+
+            # Strategy B: If ACTION_VIEW failed, try ACTION_INSTALL_PACKAGE
+            if not launched:
+                try:
+                    install_intent = Intent(Intent.ACTION_INSTALL_PACKAGE)
+                    install_intent.setDataAndType(target_uri, "application/vnd.android.package-archive")
+                    install_intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    install_intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    install_intent.putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, True)
+                    install_intent.putExtra(Intent.EXTRA_RETURN_RESULT, True)
+                    install_intent.putExtra(Intent.EXTRA_INSTALLER_PACKAGE_NAME, pkg_name)
+                    activity.startActivity(install_intent)
+                    launched = True
+                    print(f"[Install] Successfully launched ACTION_INSTALL_PACKAGE with {target_uri}")
+                except Exception as inst_err:
+                    print(f"[Install] ACTION_INSTALL_PACKAGE failed: {inst_err}")
+
+        # Strategy C: PackageInstaller Session API (bypasses FileProvider)
+        if not launched:
+            try:
+                launched = install_via_package_installer_session(activity, Path(path_str))
+            except Exception as pi_err:
+                print(f"[Install] PackageInstaller session strategy notice: {pi_err}")
+
+        # Strategy D: MediaStore or direct URI fallback
+        if not launched:
+            try:
+                fallback_uri = target_uri or get_media_content_uri(apk_path) or Uri.fromFile(file_obj)
+                intent = Intent(Intent.ACTION_VIEW)
+                intent.setDataAndType(fallback_uri, "application/vnd.android.package-archive")
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                activity.startActivity(intent)
+                launched = True
+            except Exception as fb_err:
+                print(f"[Install] Fallback intent notice: {fb_err}")
+
+        # Strategy E: System Chooser
+        if not launched:
+            try:
+                fallback_uri = target_uri or Uri.fromFile(file_obj)
+                intent = Intent(Intent.ACTION_VIEW)
+                intent.setDataAndType(fallback_uri, "application/vnd.android.package-archive")
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                chooser = Intent.createChooser(intent, "Install MSK YTDL Update")
+                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                activity.startActivity(chooser)
+                launched = True
+            except Exception as ch_err:
+                print(f"[Install] Chooser notice: {ch_err}")
+
+        if launched:
             if feedback_cb:
-                feedback_cb("success", "✓ Installer launched! Follow prompts to complete update.")
+                feedback_cb("success", "✓ Installer launched! Tap Install to complete update.")
             return True
-        except Exception as start_err:
-            print(f"[Install] startActivity error: {start_err}")
 
-        # 6. Fallback: Chooser dialog
-        try:
-            chooser = Intent.createChooser(intent, "Install MSK YTDL Update")
-            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            activity.startActivity(chooser)
-            if feedback_cb:
-                feedback_cb("success", "✓ Installer selector opened.")
-            return True
-        except Exception as ch_err:
-            print(f"[Install] Chooser error: {ch_err}")
-
-        # 7. Fallback: Open system Downloads app
+        # Strategy F: Fallback to system Downloads app
         if open_downloads_folder():
             if feedback_cb:
                 feedback_cb("fallback_downloads", f"Opened Downloads. Tap '{apk_path.name}' to install.")
@@ -596,7 +857,7 @@ def install_apk_file(apk_path: Union[str, Path], feedback_cb=None) -> bool:
         try:
             open_media_file(apk_path)
             if feedback_cb:
-                feedback_cb("success", "Opened file.")
+                feedback_cb("success", "Opened update file.")
             return True
         except Exception:
             pass
@@ -628,7 +889,7 @@ def request_android_permissions():
             Permission.READ_EXTERNAL_STORAGE,
         ]
         # On Android 13+ (API 33+), granular media & notification permissions apply
-        for p in ("READ_MEDIA_VIDEO", "READ_MEDIA_AUDIO", "READ_MEDIA_IMAGES", "POST_NOTIFICATIONS", "WAKE_LOCK"):
+        for p in ("READ_MEDIA_VIDEO", "READ_MEDIA_AUDIO", "READ_MEDIA_IMAGES", "POST_NOTIFICATIONS", "WAKE_LOCK", "REQUEST_INSTALL_PACKAGES"):
             if hasattr(Permission, p):
                 perms.append(getattr(Permission, p))
         request_permissions(perms)
@@ -3672,6 +3933,14 @@ if KIVY_AVAILABLE:
             """Sync state, refresh offline library, and periodically check for updates when returning to app."""
             if hasattr(self, "refresh_library"):
                 self.refresh_library()
+
+            # If user returned after enabling "Allow from this source" in Settings, auto-resume install
+            pending_apk = getattr(self, "_pending_apk_install", None)
+            if pending_apk and Path(pending_apk).is_file():
+                self._pending_apk_install = None
+                print(f"[OnResume] Auto-resuming pending APK installation: {pending_apk}")
+                Clock.schedule_once(lambda dt: install_apk_file(pending_apk), 0.5)
+
             last_check = getattr(self, "_last_update_check_time", 0)
             if time.time() - last_check > 14400:  # 4 hours
                 self._last_update_check_time = time.time()
@@ -8450,7 +8719,7 @@ if KIVY_AVAILABLE:
             v_card.add_widget(v_info)
             content.add_widget(v_card)
 
-            # Changelog Label & ScrollView
+            # Changelog Styled Card & ScrollView
             content.add_widget(
                 Label(
                     text="[b]Release Notes & What's New:[/b]",
@@ -8462,25 +8731,35 @@ if KIVY_AVAILABLE:
                     halign="left",
                 )
             )
+            ch_card = StyledCard(
+                bg_color=(0.09, 0.12, 0.18, 1.0),
+                radius=10,
+                padding=[dp(12), dp(10)],
+                size_hint_y=1.0,
+            )
             ch_scroll = ScrollView(do_scroll_x=False, do_scroll_y=True, size_hint_y=1.0)
+            formatted_notes = format_release_notes_for_display(changelog, new_version)
             ch_lbl = Label(
-                text=safe_display_text(changelog) or "Bug fixes, performance improvements, and new features.",
+                text=formatted_notes,
+                markup=True,
                 font_size="11sp",
-                color=(0.75, 0.80, 0.90, 1.0),
+                color=(0.85, 0.88, 0.95, 1.0),
                 size_hint_y=None,
                 halign="left",
                 valign="top",
             )
             ch_lbl.bind(width=lambda ins, w: setattr(ins, "text_size", (w, None)))
-            ch_lbl.bind(texture_size=lambda ins, ts: setattr(ins, "height", max(dp(50), ts[1] + dp(10))))
+            ch_lbl.bind(texture_size=lambda ins, ts: setattr(ins, "height", max(dp(60), ts[1] + dp(12))))
             ch_scroll.add_widget(ch_lbl)
-            content.add_widget(ch_scroll)
+            ch_card.add_widget(ch_scroll)
+            content.add_widget(ch_card)
 
             # In-App Auto-Update Download Progress Box
             up_progress_box = BoxLayout(orientation="vertical", spacing=dp(3), size_hint_y=None, height=dp(28))
             up_progress_bar = ProgressBar(max=100, value=0, size_hint_y=None, height=dp(6))
             up_status_lbl = Label(
                 text="Tap below to auto-download and install update.",
+                markup=True,
                 font_size="10.5sp",
                 color=(0.75, 0.85, 0.95, 1.0),
                 size_hint_y=None,
@@ -8538,7 +8817,11 @@ if KIVY_AVAILABLE:
 
             def trigger_install(file_path):
                 up_status_lbl.text = "[color=#00E676]Launching Package Installer...[/color]"
-                install_apk_file(file_path, feedback_cb=on_install_feedback)
+                def worker():
+                    def thread_safe_feedback(st, msg):
+                        Clock.schedule_once(lambda dt: on_install_feedback(st, msg))
+                    install_apk_file(file_path, feedback_cb=thread_safe_feedback)
+                threading.Thread(target=worker, daemon=True).start()
 
             def start_auto_update_download(ins):
                 if download_state.get("downloaded_file") and Path(download_state["downloaded_file"]).exists():
@@ -8576,7 +8859,7 @@ if KIVY_AVAILABLE:
                                     from jnius import autoclass
                                     PythonActivity = autoclass("org.kivy.android.PythonActivity")
                                     ctx_act = PythonActivity.mActivity
-                                    ext_d = ctx_act.getExternalFilesDir(None)
+                                    ext_d = ctx_act.getExternalFilesDir(None) or ctx_act.getExternalCacheDir()
                                     if ext_d:
                                         apk_dest = Path(ext_d.getAbsolutePath()) / f"MSK_YTDL_v{new_version}.apk"
                                 except Exception:
@@ -8606,19 +8889,31 @@ if KIVY_AVAILABLE:
                                             up_status_lbl.text = f"Downloading update: {p:.0f}% ({c:.1f}/{t:.1f} MB)"
                                         Clock.schedule_once(lambda dt: update_ui())
 
+                        # Validate downloaded APK file
+                        if not apk_dest.exists() or apk_dest.stat().st_size < 100 * 1024:
+                            raise RuntimeError("Downloaded APK file is incomplete or too small.")
+                        with open(apk_dest, "rb") as chk_f:
+                            if chk_f.read(4) != b"PK\x03\x04":
+                                raise RuntimeError("Downloaded file is not a valid APK archive.")
+
+                        try:
+                            os.chmod(str(apk_dest), 0o777)
+                        except Exception:
+                            pass
+
                         download_state["downloaded_file"] = str(apk_dest)
                         download_state["is_downloading"] = False
 
                         def on_success():
                             up_progress_bar.value = 100
-                            up_status_lbl.text = "[color=#00E676]✓ Download complete! Tap Install below or open from Downloads.[/color]"
+                            up_status_lbl.text = "[color=#00E676]✓ Download complete! Launching package installer...[/color]"
                             auto_dl_btn.disabled = False
                             auto_dl_btn.text = "🚀 TAP TO INSTALL NOW"
                             auto_dl_btn.bg_color = (0.10, 0.65, 0.30, 1.0)
                             auto_dl_btn.text_color = (1, 1, 1, 1)
                             self.update_status(f"[color=#00E676]Update v{new_version} ready to install![/color]", 100)
                             # Automatically trigger install attempt
-                            trigger_install(apk_dest)
+                            Clock.schedule_once(lambda dt: trigger_install(apk_dest), 0.3)
 
                         Clock.schedule_once(lambda dt: on_success())
 

@@ -54,6 +54,9 @@ android.res_xml = res/xml/file_paths.xml
 # (str) Extra XML to write directly inside the <manifest><application> element (registers FileProvider)
 android.extra_manifest_application_xml = %(source.dir)s/res/provider_manifest.xml
 
+# (bool) Enable AndroidX and Jetifier for modern Android support (required for FileProvider & Android 10+)
+android.enable_androidx = True
+
 # (str) launchMode to set for the main activity
 android.manifest.launch_mode = singleTask
 

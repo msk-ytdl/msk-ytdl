@@ -1373,6 +1373,59 @@ def test_play_online_video_does_not_redirect_to_youtube():
         assert not mock_browser.called
 
 
+def test_format_release_notes_for_display():
+    """Verify format_release_notes_for_display strips technical boilerplate and outputs clean BBCode markup."""
+    from mobile_app import format_release_notes_for_display
+
+    raw_gh_notes = """## MSK YTDL v1.0.1.35 Released! Official production release by **MSK Software Solutions**. ### Download Assets: - **Android APK**: [`MSK-YTDL.apk`](https://github.com/msk-ytdl/msk-ytdl/releases/download/v1.0.1.35/MSK-YTDL.apk) - Officially signed with **MSK Software Solutions Release Certificate** (APK Signature Schemes v1, v2, and v3 enabled). - Memory-aligned (4-byte zipalign) for seamless installation on Android 5.0+ to Android 15+. - *Note for upgrading users:* If you previously installed an older or test build, please uninstall it first before installing this official release. - **Windows Standalone**: [`MSK-YTDL.exe`](https://github.com/msk-ytdl/msk-ytdl/releases/download/v1.0.1.35/MSK-YTDL.exe) - Digitally signed with Authenticode SHA256. - **Windows Complete Portable Package**: [`MSK-YTDL-Windows-x64.zip`](https://github.com/msk-ytdl/msk-ytdl/releases/download/v1.0.1.35/MSK-YTDL-Windows-x64.zip) - Includes bundled FFmpeg & FFprobe, 1-click batch launcher, and Certificate helper. ### Highlights: - **1-Tap YouTube Share**: Share directly from the YouTube app to MSK YTDL on Android. - **HD Video & Audio**: Up to 1080p Full HD video and 320kbps MP3 audio with album artwork. - **Smart Archive**: Never re-download existing videos in playlists. - **100% Free & Ad-Free**: Clean, open-source software by MSK Software Solutions."""
+
+    formatted = format_release_notes_for_display(raw_gh_notes, "1.0.1.35")
+
+    # Must contain title header with version
+    assert "What's New in v1.0.1.35:" in formatted
+    # Must contain bullet highlights
+    assert "1-Tap YouTube Share" in formatted
+    assert "HD Video & Audio" in formatted
+    assert "Smart Archive" in formatted
+    assert "100% Free & Ad-Free" in formatted
+    # Must use Kivy color markup
+    assert "[color=#00E676]•[/color]" in formatted
+    assert "[color=#FFD54F]" in formatted
+
+    # Must NOT contain raw download assets, zip files, or hashes
+    assert "MSK-YTDL-Windows-x64.zip" not in formatted
+    assert "Authenticode SHA256" not in formatted
+    assert "https://github.com" not in formatted
+    assert "4-byte zipalign" not in formatted
+
+
+def test_format_release_notes_for_display_empty_and_fallback():
+    """Verify fallback to curated highlights when notes are empty or brief."""
+    from mobile_app import format_release_notes_for_display
+
+    formatted_empty = format_release_notes_for_display("", "1.0.1.35")
+    assert "What's New in v1.0.1.35:" in formatted_empty
+    assert "Built-in Media Player" in formatted_empty
+    assert "Seamless Auto-Update" in formatted_empty
+    assert "[color=#00E676]•[/color]" in formatted_empty
+
+    formatted_short = format_release_notes_for_display("Performance and bug fixes", "1.0.1.36")
+    assert "What's New in v1.0.1.36:" in formatted_short
+    assert len(formatted_short.split("\n\n")) >= 4
+
+
+def test_install_via_package_installer_session_safety(tmp_path):
+    """Verify install_via_package_installer_session returns False safely when not in Android runtime."""
+    from mobile_app import install_via_package_installer_session
+    from pathlib import Path
+
+    fake_apk = tmp_path / "app.apk"
+    fake_apk.write_bytes(b"PK\x03\x04" + b"\x00" * 200)
+
+    # When activity is None or on desktop, must return False safely without crashing
+    assert install_via_package_installer_session(None, fake_apk) is False
+
+
 
 
 
