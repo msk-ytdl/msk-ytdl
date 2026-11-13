@@ -1229,6 +1229,42 @@ def test_switch_tab_videos_fallback_to_home():
     assert "HOME_VIEW" in added
 
 
+def test_install_apk_file_feedback_callback(tmp_path):
+    """Verify install_apk_file interacts with feedback_cb accurately."""
+    from mobile_app import install_apk_file
+    feedback_calls = []
+
+    def on_feedback(status, message):
+        feedback_calls.append((status, message))
+
+    # 1. Non-existent file
+    res = install_apk_file(tmp_path / "non_existent.apk", feedback_cb=on_feedback)
+    assert res is False
+    assert len(feedback_calls) == 1
+    assert feedback_calls[0][0] == "error"
+
+    # 2. Existing file on desktop
+    test_apk = tmp_path / "app_update.apk"
+    test_apk.write_bytes(b"PK00dummyapkcontent")
+    feedback_calls.clear()
+
+    from unittest.mock import patch
+    with patch("mobile_app.open_media_file", return_value=None):
+        res2 = install_apk_file(test_apk, feedback_cb=on_feedback)
+        assert res2 is True
+        assert len(feedback_calls) == 1
+        assert feedback_calls[0][0] == "success"
+
+
+def test_open_downloads_folder():
+    """Verify open_downloads_folder runs safely."""
+    from mobile_app import open_downloads_folder
+    from unittest.mock import patch
+    with patch("mobile_app.open_media_file", return_value=None):
+        assert open_downloads_folder() is True
+
+
+
 
 
 

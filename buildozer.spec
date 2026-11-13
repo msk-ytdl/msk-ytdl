@@ -48,6 +48,12 @@ android.permissions = INTERNET,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE,ACCE
 # (str) XML file to include as an intent filters in <activity> tag (enables "Share from YouTube")
 android.manifest.intent_filters = intent_filters.xml
 
+# (list) Copy these files to src/main/res/xml/ (used for FileProvider paths)
+android.res_xml = res/xml/file_paths.xml
+
+# (str) Extra XML to write directly inside the <manifest><application> element (registers FileProvider)
+android.extra_manifest_application_xml = %(source.dir)s/res/provider_manifest.xml
+
 # (str) launchMode to set for the main activity
 android.manifest.launch_mode = singleTask
 

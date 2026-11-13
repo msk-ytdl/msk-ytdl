@@ -409,13 +409,66 @@ def is_version_newer(current_version: str, remote_version: str) -> bool:
     return False
 
 
-def install_apk_file(apk_path: Union[str, Path]) -> bool:
-    """Prompt the Android Package Installer or OS to install a downloaded APK file."""
+def open_downloads_folder() -> bool:
+    """Launch the system Downloads app or Files manager on Android/Desktop."""
+    try:
+        if is_running_on_android():
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            activity = PythonActivity.mActivity
+            Intent = autoclass("android.content.Intent")
+            DownloadManager = autoclass("android.app.DownloadManager")
+            try:
+                dl_intent = Intent(DownloadManager.ACTION_VIEW_DOWNLOADS)
+                dl_intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                activity.startActivity(dl_intent)
+                return True
+            except Exception as e:
+                print(f"[OpenDownloads] ACTION_VIEW_DOWNLOADS notice: {e}")
+                try:
+                    f_intent = Intent(Intent.ACTION_VIEW)
+                    Uri = autoclass("android.net.Uri")
+                    f_intent.setDataAndType(Uri.parse("content://downloads/all_downloads"), "*/*")
+                    f_intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    activity.startActivity(f_intent)
+                    return True
+                except Exception:
+                    pass
+        else:
+            dl_dir = get_android_download_dir()
+            open_media_file(dl_dir)
+            return True
+    except Exception as ex:
+        print(f"[OpenDownloads] Notice: {ex}")
+    return False
+
+
+def install_apk_file(apk_path: Union[str, Path], feedback_cb=None) -> bool:
+    """
+    Prompt the Android Package Installer or OS to install a downloaded APK file.
+    Provides interactive feedback_cb(status_type, message) for permission and state tracking.
+    """
     if not apk_path:
+        if feedback_cb:
+            feedback_cb("error", "No APK file specified.")
         return False
     apk_path = Path(apk_path)
     if not str(apk_path).strip() or not apk_path.is_file():
+        if feedback_cb:
+            feedback_cb("error", f"APK file not found: {apk_path.name}")
         return False
+
+    if not is_running_on_android():
+        try:
+            open_media_file(apk_path)
+            if feedback_cb:
+                feedback_cb("success", f"Opened {apk_path.name}")
+            return True
+        except Exception:
+            if feedback_cb:
+                feedback_cb("error", "Could not open file on desktop.")
+            return False
+
     try:
         from jnius import autoclass
         PythonActivity = autoclass("org.kivy.android.PythonActivity")
@@ -425,10 +478,10 @@ def install_apk_file(apk_path: Union[str, Path]) -> bool:
         Build = autoclass("android.os.Build")
 
         activity = PythonActivity.mActivity
-        file_obj = File(str(apk_path.resolve()))
-        intent = Intent(Intent.ACTION_VIEW)
+        path_str = str(apk_path.resolve())
+        file_obj = File(path_str)
 
-        # Disable StrictMode file URI exposure checks on Android 7+ (API 24 through 35)
+        # 1. Disable StrictMode file URI exposure checks on Android 7+ (API 24 through 35)
         try:
             StrictMode = autoclass("android.os.StrictMode")
             VmPolicyBuilder = autoclass("android.os.StrictMode$VmPolicy$Builder")
@@ -436,42 +489,127 @@ def install_apk_file(apk_path: Union[str, Path]) -> bool:
         except Exception as sm_err:
             print(f"[StrictMode] VmPolicy notice: {sm_err}")
 
-        # Check Android 8.0+ (API 26+) unknown app install permission
+        # 2. Check Android 8.0+ (API 26+) unknown app install permission
         if Build.VERSION.SDK_INT >= 26:
+            pm = activity.getPackageManager()
+            can_install = True
             try:
-                pm = activity.getPackageManager()
-                if hasattr(pm, "canRequestPackageInstalls") and not pm.canRequestPackageInstalls():
+                can_install = pm.canRequestPackageInstalls()
+            except Exception as ce:
+                print(f"[Install] canRequestPackageInstalls check: {ce}")
+
+            if not can_install:
+                try:
                     Settings = autoclass("android.provider.Settings")
                     manage_intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
                     manage_intent.setData(Uri.parse(f"package:{activity.getPackageName()}"))
                     manage_intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     activity.startActivity(manage_intent)
-            except Exception as pe:
-                print(f"[AutoUpdate] Unknown source permission notice: {pe}")
+                except Exception as pe:
+                    print(f"[Install] Settings intent notice: {pe}")
+                if feedback_cb:
+                    feedback_cb("permission_needed", "Enable 'Allow from this source', then tap Install again.")
+                return False
 
-        uri = None
+        # 3. Trigger MediaScanner so MediaStore registers and indexes the APK
+        try:
+            MediaScannerConnection = autoclass("android.media.MediaScannerConnection")
+            MediaScannerConnection.scanFile(
+                activity,
+                [path_str],
+                ["application/vnd.android.package-archive"],
+                None
+            )
+        except Exception as scan_err:
+            print(f"[Install] MediaScanner notice: {scan_err}")
+
+        # 4. Resolve Content URI via FileProvider or MediaStore
+        target_uri = None
         if Build.VERSION.SDK_INT >= 24:
             try:
                 FileProvider = autoclass("androidx.core.content.FileProvider")
                 package_name = activity.getPackageName()
-                uri = FileProvider.getUriForFile(activity, f"{package_name}.fileprovider", file_obj)
+                target_uri = FileProvider.getUriForFile(activity, f"{package_name}.fileprovider", file_obj)
+            except Exception as fp_err:
+                print(f"[Install] FileProvider notice: {fp_err}")
+                target_uri = None
+
+        if not target_uri:
+            try:
+                target_uri = get_media_content_uri(apk_path)
             except Exception:
-                uri = None
+                target_uri = None
 
-        if not uri:
-            uri = Uri.fromFile(file_obj)
+        if not target_uri:
+            target_uri = Uri.fromFile(file_obj)
 
-        intent.setDataAndType(uri, "application/vnd.android.package-archive")
+        # 5. Launch Package Installer Intent
+        intent = Intent(Intent.ACTION_VIEW)
+        intent.setDataAndType(target_uri, "application/vnd.android.package-archive")
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        activity.startActivity(intent)
-        return True
-    except Exception as e:
-        print(f"[AutoUpdate] Native install intent notice: {e}")
+
+        # Explicitly grant URI permission to package installer components
+        try:
+            pm = activity.getPackageManager()
+            matches = pm.queryIntentActivities(intent, 65536)
+            if matches:
+                for i in range(matches.size()):
+                    target_pkg = matches.get(i).activityInfo.packageName
+                    try:
+                        activity.grantUriPermission(target_pkg, target_uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    except Exception:
+                        pass
+        except Exception as ge:
+            print(f"[Install] grantUriPermission notice: {ge}")
+
+        try:
+            activity.startActivity(intent)
+            if feedback_cb:
+                feedback_cb("success", "✓ Installer launched! Follow prompts to complete update.")
+            return True
+        except Exception as start_err:
+            print(f"[Install] startActivity error: {start_err}")
+
+        # 6. Fallback: Chooser dialog
+        try:
+            chooser = Intent.createChooser(intent, "Install MSK YTDL Update")
+            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            activity.startActivity(chooser)
+            if feedback_cb:
+                feedback_cb("success", "✓ Installer selector opened.")
+            return True
+        except Exception as ch_err:
+            print(f"[Install] Chooser error: {ch_err}")
+
+        # 7. Fallback: Open system Downloads app
+        if open_downloads_folder():
+            if feedback_cb:
+                feedback_cb("fallback_downloads", f"Opened Downloads. Tap '{apk_path.name}' to install.")
+            return True
+
         try:
             open_media_file(apk_path)
+            if feedback_cb:
+                feedback_cb("success", "Opened file.")
             return True
         except Exception:
+            pass
+
+        if feedback_cb:
+            feedback_cb("error", f"Could not launch installer. File saved: {apk_path.name}")
+        return False
+
+    except Exception as e:
+        print(f"[AutoUpdate] Native install intent error: {e}")
+        try:
+            open_media_file(apk_path)
+            if feedback_cb:
+                feedback_cb("success", "Opened file.")
+            return True
+        except Exception:
+            if feedback_cb:
+                feedback_cb("error", f"Install error: {e}")
             return False
 
 
@@ -7628,10 +7766,39 @@ if KIVY_AVAILABLE:
                 height=dp(40),
             )
 
+            def on_install_feedback(status, message):
+                if status == "permission_needed":
+                    up_status_lbl.text = f"[color=#FFB300]{message}[/color]"
+                    auto_dl_btn.disabled = False
+                    auto_dl_btn.text = "⚙ ENABLE PERMISSION & INSTALL"
+                    auto_dl_btn.bg_color = (1.0, 0.68, 0.0, 1.0)
+                    auto_dl_btn.text_color = (0.04, 0.05, 0.08, 1.0)
+                elif status == "success":
+                    up_status_lbl.text = f"[color=#00E676]{message}[/color]"
+                    auto_dl_btn.disabled = False
+                    auto_dl_btn.text = "🚀 RE-LAUNCH INSTALLER"
+                    auto_dl_btn.bg_color = (0.10, 0.65, 0.30, 1.0)
+                    auto_dl_btn.text_color = (1, 1, 1, 1)
+                elif status == "fallback_downloads":
+                    up_status_lbl.text = f"[color=#00E676]{message}[/color]"
+                    auto_dl_btn.disabled = False
+                    auto_dl_btn.text = "📂 OPEN DOWNLOADS APP"
+                    auto_dl_btn.bg_color = (0.18, 0.24, 0.38, 1.0)
+                    auto_dl_btn.text_color = (0.40, 0.85, 1.0, 1.0)
+                else:
+                    up_status_lbl.text = f"[color=#FF5252]{message}[/color]"
+                    auto_dl_btn.disabled = False
+                    auto_dl_btn.text = "🚀 RETRY INSTALL"
+                    auto_dl_btn.bg_color = (1.0, 0.68, 0.0, 1.0)
+                    auto_dl_btn.text_color = (0.04, 0.05, 0.08, 1.0)
+
+            def trigger_install(file_path):
+                up_status_lbl.text = "[color=#00E676]Launching Package Installer...[/color]"
+                install_apk_file(file_path, feedback_cb=on_install_feedback)
+
             def start_auto_update_download(ins):
                 if download_state.get("downloaded_file") and Path(download_state["downloaded_file"]).exists():
-                    up_status_lbl.text = "[color=#00E676]Launching Package Installer...[/color]"
-                    install_apk_file(download_state["downloaded_file"])
+                    trigger_install(download_state["downloaded_file"])
                     return
 
                 if not target_apk_url:
@@ -7700,13 +7867,14 @@ if KIVY_AVAILABLE:
 
                         def on_success():
                             up_progress_bar.value = 100
-                            up_status_lbl.text = "[color=#00E676]✓ Download Complete! Launching Installer...[/color]"
+                            up_status_lbl.text = "[color=#00E676]✓ Download complete! Tap Install below or open from Downloads.[/color]"
                             auto_dl_btn.disabled = False
                             auto_dl_btn.text = "🚀 TAP TO INSTALL NOW"
                             auto_dl_btn.bg_color = (0.10, 0.65, 0.30, 1.0)
                             auto_dl_btn.text_color = (1, 1, 1, 1)
-                            install_apk_file(apk_dest)
                             self.update_status(f"[color=#00E676]Update v{new_version} ready to install![/color]", 100)
+                            # Automatically trigger install attempt
+                            trigger_install(apk_dest)
 
                         Clock.schedule_once(lambda dt: on_success())
 
@@ -7725,14 +7893,25 @@ if KIVY_AVAILABLE:
             auto_dl_btn.bind(on_press=start_auto_update_download)
             btn_col.add_widget(auto_dl_btn)
 
-            sub_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(36))
+            sub_row = BoxLayout(orientation="horizontal", spacing=dp(6), size_hint_y=None, height=dp(36))
+            open_dl_btn = IconActionButton(
+                icon_path="downloads.png",
+                text="DOWNLOADS",
+                bg_color=(0.18, 0.24, 0.38, 1.0),
+                text_color=(0.40, 0.85, 1.0, 1.0),
+                font_size="10.5sp",
+                size_hint_x=0.38,
+            )
+            open_dl_btn.bind(on_press=lambda ins: open_downloads_folder())
+            sub_row.add_widget(open_dl_btn)
+
             github_btn = IconActionButton(
                 icon_path="settings.png",
-                text="GITHUB RELEASES",
+                text="BROWSER",
                 bg_color=(0.14, 0.18, 0.28, 1.0),
                 text_color=(0.80, 0.88, 1.0, 1.0),
-                font_size="11sp",
-                size_hint_x=0.6,
+                font_size="10.5sp",
+                size_hint_x=0.34,
             )
             github_btn.bind(on_press=lambda ins: open_web_url(download_url))
             sub_row.add_widget(github_btn)
@@ -7742,8 +7921,8 @@ if KIVY_AVAILABLE:
                 text="LATER",
                 bg_color=(0.18, 0.20, 0.28, 1.0),
                 text_color=(0.80, 0.85, 0.95, 1.0),
-                font_size="11sp",
-                size_hint_x=0.4,
+                font_size="10.5sp",
+                size_hint_x=0.28,
             )
             later_btn.bind(on_press=modal.dismiss)
             sub_row.add_widget(later_btn)
