@@ -1289,6 +1289,91 @@ def test_open_downloads_folder():
         assert open_downloads_folder() is True
 
 
+def test_format_player_time():
+    """Verify format_player_time converts seconds into MM:SS and HH:MM:SS."""
+    from mobile_app import format_player_time
+    assert format_player_time(None) == "00:00"
+    assert format_player_time(-5) == "00:00"
+    assert format_player_time(0) == "00:00"
+    assert format_player_time(45) == "00:45"
+    assert format_player_time(125) == "02:05"
+    assert format_player_time(3665) == "1:01:05"
+
+
+def test_parse_duration_seconds():
+    """Verify parse_duration_seconds parses strings and numbers accurately."""
+    from mobile_app import parse_duration_seconds
+    assert parse_duration_seconds(120) == 120.0
+    assert parse_duration_seconds("03:30") == 210.0
+    assert parse_duration_seconds("01:02:03") == 3723.0
+    assert parse_duration_seconds("") == 0.0
+    assert parse_duration_seconds(None) == 0.0
+
+
+def test_resolve_direct_media_stream_url_mocked():
+    """Verify resolve_direct_media_stream_url extracts progressive stream URLs without YouTube redirect."""
+    from mobile_app import resolve_direct_media_stream_url
+    from unittest.mock import MagicMock, patch
+
+    mock_info = {
+        "url": "https://direct-stream.googlevideo.com/videoplayback?id=123",
+        "title": "Sample Song",
+        "duration": 180,
+    }
+    with patch("yt_dlp.YoutubeDL") as mock_ydl_cls:
+        instance = MagicMock()
+        instance.extract_info.return_value = mock_info
+        instance.__enter__.return_value = instance
+        mock_ydl_cls.return_value = instance
+
+        stream_url, info = resolve_direct_media_stream_url("https://www.youtube.com/watch?v=12345678901")
+        assert stream_url == "https://direct-stream.googlevideo.com/videoplayback?id=123"
+        assert info["title"] == "Sample Song"
+
+
+def test_builtin_media_player_modal_and_controls():
+    """Verify Built-in Media Player initializes with all playback controls and useful features."""
+    from mobile_app import MSKDownloaderMobile, KIVY_AVAILABLE
+    if not KIVY_AVAILABLE:
+        return
+
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    app.update_status = lambda msg, p: None
+
+    mock_item = {
+        "id": "abc12345",
+        "title": "Arijit Singh - Kesariya",
+        "channel": "Sony Music India",
+        "duration": "04:28",
+        "url": "https://www.youtube.com/watch?v=abc12345",
+        "thumb": "",
+    }
+
+    from unittest.mock import patch
+    with patch("threading.Thread.start"):
+        modal = app.open_builtin_media_player(media_item=mock_item, media_type="video")
+        assert modal is not None
+
+        # Verify open_video_player_modal wraps open_builtin_media_player
+        modal2 = app.open_video_player_modal(media_item=mock_item)
+        assert modal2 is not None
+
+        modal.dismiss()
+        modal2.dismiss()
+
+
+def test_play_online_video_does_not_redirect_to_youtube():
+    """Verify play_online_video does not launch external browser or YouTube app."""
+    from mobile_app import play_online_video
+    from unittest.mock import patch
+
+    with patch("webbrowser.open") as mock_browser, patch("threading.Thread.start"):
+        play_online_video("https://www.youtube.com/watch?v=testvideo12", title="Test Video")
+        # Ensure webbrowser.open was NEVER called to redirect to YouTube
+        assert not mock_browser.called
+
+
+
 
 
 
