@@ -4260,7 +4260,10 @@ if KIVY_AVAILABLE:
         # Tab Switching Logic
         # -----------------------------------------------------------------
         def switch_tab(self, tab_name: str):
-            if self.active_tab == tab_name and self.main_container.children:
+            if not hasattr(self, "main_container") or self.main_container is None:
+                self.active_tab = tab_name
+                return
+            if getattr(self, "active_tab", None) == tab_name and self.main_container.children:
                 return
 
             # Auto-lock private vault when leaving downloads tab for security
@@ -4610,6 +4613,28 @@ if KIVY_AVAILABLE:
             )
             dest_card.add_widget(self.storage_note)
             content.add_widget(dest_card)
+
+            # Dynamic Video Search Results Section (Shown only when user searches)
+            self.home_results_header_lbl = Label(
+                text="",
+                markup=True,
+                font_size="13sp",
+                color=(0.95, 0.95, 1.0, 1.0),
+                size_hint_y=None,
+                height=0,
+                opacity=0,
+                halign="left",
+            )
+            self.home_results_header_lbl.bind(size=self.home_results_header_lbl.setter("text_size"))
+            content.add_widget(self.home_results_header_lbl)
+
+            self.home_recommendations_container = BoxLayout(
+                orientation="vertical",
+                spacing=dp(10),
+                size_hint_y=None,
+            )
+            self.home_recommendations_container.bind(minimum_height=self.home_recommendations_container.setter("height"))
+            content.add_widget(self.home_recommendations_container)
 
             scroll.add_widget(content)
             return scroll
@@ -5179,6 +5204,7 @@ if KIVY_AVAILABLE:
             self.mini_player_play_btn.set_bg_color([1.0, 0.72, 0.0, 1.0])
 
             def worker():
+                notif_mgr = getattr(self, "notification_manager", None) or get_notification_manager()
                 try:
                     import yt_dlp
                     ydl_opts = {
@@ -5256,7 +5282,7 @@ if KIVY_AVAILABLE:
                 return
             normalized = all_urls[0] if all_urls else normalize_youtube_url(url)
             if not normalized:
-                self.fetch_preview(f"ytsearch1:{url}", auto_open_modal=True)
+                self.search_youtube_home(url)
                 return
             if hasattr(self, "current_preview_info") and self.current_preview_info and self.current_preview_info.get("url") == normalized:
                 self.open_download_modal(self.current_preview_info)
@@ -5277,7 +5303,211 @@ if KIVY_AVAILABLE:
                 self.current_preview_url = normalized
                 self.fetch_preview(normalized, auto_open_modal=True)
             else:
-                self.fetch_preview(f"ytsearch1:{query}", auto_open_modal=True)
+                self.search_youtube_home(query)
+
+        def search_youtube_home(self, query: str, section_title: Optional[str] = None):
+            """Search YouTube and display multiple video results directly on Home page."""
+            title = section_title or f"Search Results for: \"{query[:28]}\""
+            if hasattr(self, "home_results_header_lbl"):
+                self.home_results_header_lbl.height = dp(24)
+                self.home_results_header_lbl.opacity = 1.0
+                self.home_results_header_lbl.text = f"[b]{title}[/b]"
+            if hasattr(self, "home_recommendations_container"):
+                self.home_recommendations_container.clear_widgets()
+
+                loading_card = StyledCard(
+                    orientation="vertical",
+                    padding=[dp(16), dp(14)],
+                    spacing=dp(6),
+                    size_hint_y=None,
+                    height=dp(70),
+                    bg_color=(0.08, 0.10, 0.15, 1.0),
+                )
+                loading_lbl = Label(
+                    text=f"Searching YouTube for \"{query[:28]}\"...\nPlease wait.",
+                    font_size="12sp",
+                    color=(1.0, 0.75, 0.0, 1.0),
+                    halign="center",
+                )
+                loading_lbl.bind(size=loading_lbl.setter("text_size"))
+                loading_card.add_widget(loading_lbl)
+                self.home_recommendations_container.add_widget(loading_card)
+
+            self.update_status(f"Searching YouTube for '{query[:25]}'...", 20)
+
+            def worker():
+                results = []
+                try:
+                    import yt_dlp
+                    safe_logger = AndroidYTDLLogger()
+                    ydl_opts = {
+                        "extract_flat": True,
+                        "skip_download": True,
+                        "logger": safe_logger,
+                        "quiet": True,
+                        "no_warnings": True,
+                        "socket_timeout": 20,
+                    }
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        res = ydl.extract_info(f"ytsearch10:{query}", download=False)
+                        if res and "entries" in res:
+                            for entry in res["entries"]:
+                                if not entry:
+                                    continue
+                                vid_id = entry.get("id")
+                                vid_title = entry.get("title") or "YouTube Video"
+                                vid_uploader = entry.get("uploader") or entry.get("channel") or "YouTube"
+                                dur_sec = entry.get("duration")
+                                vid_duration = format_duration(dur_sec) if dur_sec else "Video"
+                                vid_thumb = entry.get("thumbnail") or (
+                                    f"https://i.ytimg.com/vi/{vid_id}/mqdefault.jpg" if vid_id else ""
+                                )
+                                vid_url = entry.get("url") or entry.get("webpage_url") or (
+                                    f"https://www.youtube.com/watch?v={vid_id}" if vid_id else ""
+                                )
+                                results.append({
+                                    "id": vid_id,
+                                    "title": vid_title,
+                                    "channel": vid_uploader,
+                                    "duration": vid_duration,
+                                    "url": vid_url,
+                                    "thumb": vid_thumb,
+                                    "category": "YouTube",
+                                })
+                except Exception as e:
+                    print(f"[Home Search] YouTube search error: {e}")
+
+                Clock.schedule_once(lambda dt, r=results, q=query: self.render_home_video_results(r, q))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def render_home_video_results(self, results: List[Dict[str, Any]], query: str):
+            """Display live search results on Home page."""
+            if not hasattr(self, "home_recommendations_container"):
+                return
+            self.home_recommendations_container.clear_widgets()
+            if not results:
+                empty_card = StyledCard(
+                    orientation="vertical",
+                    padding=[dp(16), dp(16)],
+                    spacing=dp(6),
+                    size_hint_y=None,
+                    height=dp(80),
+                    bg_color=(0.08, 0.10, 0.15, 1.0),
+                )
+                empty_lbl = Label(
+                    text=f"No results found for \"{query[:25]}\".\nCheck connection or try another search term.",
+                    font_size="11.5sp",
+                    color=(0.70, 0.75, 0.85, 1.0),
+                    halign="center",
+                )
+                empty_lbl.bind(size=empty_lbl.setter("text_size"))
+                empty_card.add_widget(empty_lbl)
+                self.home_recommendations_container.add_widget(empty_card)
+                self.update_status(f"No results found for '{query[:25]}'.", 0)
+                return
+
+            self.update_status(f"Found {len(results)} videos for '{query[:25]}'.", 0)
+            for item in results:
+                self.add_video_result_card(item, container=self.home_recommendations_container)
+
+        def add_video_result_card(self, item: Dict[str, Any], container: Optional[BoxLayout] = None):
+            """Create a video card with safe thumbnail, in-app PLAY modal, and 1-tap GET/Download popup."""
+            card = StyledCard(
+                orientation="horizontal",
+                padding=[dp(10), dp(8)],
+                spacing=dp(10),
+                size_hint_y=None,
+                height=dp(88),
+                bg_color=(0.10, 0.12, 0.18, 1.0),
+            )
+
+            # Thumbnail with safe error fallback to prevent red cross X
+            thumb_url = item.get("thumb") or ""
+            thumb = AsyncImage(
+                source=thumb_url,
+                size_hint=(None, None),
+                size=(dp(96), dp(64)),
+                allow_stretch=True,
+                keep_ratio=True,
+            )
+            def on_thumb_error(instance, *args):
+                for candidate in ("icon.png", "assets/logo.png"):
+                    if os.path.exists(candidate):
+                        instance.source = candidate
+                        break
+                instance.opacity = 0.6
+            thumb.bind(on_error=on_thumb_error)
+            card.add_widget(thumb)
+
+            # Info column
+            info_col = BoxLayout(orientation="vertical", spacing=dp(2), size_hint_x=1.0)
+            clean_t = safe_display_text(item.get("title", ""))
+            t_lbl = Label(
+                text=f"[b]{clean_t[:42]}[/b]",
+                markup=True,
+                font_size="11.5sp",
+                color=(0.95, 0.95, 1.0, 1.0),
+                halign="left",
+                valign="top",
+                size_hint_y=None,
+                height=dp(32),
+            )
+            t_lbl.bind(size=t_lbl.setter("text_size"))
+            info_col.add_widget(t_lbl)
+
+            channel_name = safe_display_text(item.get("channel", "YouTube"))
+            dur_str = item.get("duration", "Video")
+            meta_lbl = Label(
+                text=f"{dur_str} • {channel_name[:22]}",
+                font_size="10sp",
+                color=(0.65, 0.70, 0.82, 1.0),
+                halign="left",
+                valign="middle",
+                size_hint_y=None,
+                height=dp(16),
+            )
+            meta_lbl.bind(size=meta_lbl.setter("text_size"))
+            info_col.add_widget(meta_lbl)
+            card.add_widget(info_col)
+
+            # Action Buttons Column: [PLAY] and [GET]
+            btn_col = BoxLayout(orientation="vertical", spacing=dp(4), size_hint=(None, None), size=(dp(68), dp(68)))
+
+            play_btn = IconActionButton(
+                icon_path="play.png",
+                text="PLAY",
+                font_size="10.5sp",
+                size_hint_y=0.5,
+                bg_color=(0.18, 0.24, 0.38, 1.0),
+                text_color=(0.40, 0.85, 1.0, 1.0),
+            )
+            def on_card_play(ins, it=item):
+                dl_file = find_downloaded_media_file(title=it.get("title"), item_id=it.get("id"))
+                if dl_file and dl_file.exists():
+                    open_media_file(dl_file)
+                else:
+                    self.open_video_player_modal(it)
+
+            play_btn.bind(on_press=on_card_play)
+            btn_col.add_widget(play_btn)
+
+            dl_btn = IconActionButton(
+                icon_path="download_arrow.png",
+                text="GET",
+                font_size="10.5sp",
+                size_hint_y=0.5,
+                bg_color=(1.0, 0.68, 0.0, 1.0),
+                text_color=(0.04, 0.05, 0.08, 1.0),
+            )
+            dl_btn.bind(on_press=lambda ins, it=item: self.open_download_modal(it))
+            btn_col.add_widget(dl_btn)
+
+            card.add_widget(btn_col)
+
+            target_container = container if container is not None else getattr(self, "home_recommendations_container", None)
+            if target_container:
+                target_container.add_widget(card)
 
         def populate_recommendations(self):
             """Stub maintained for backward compatibility."""
@@ -6006,6 +6236,12 @@ if KIVY_AVAILABLE:
             self.preview_card.opacity = 0.0
             self.clipboard_banner.height = 0
             self.clipboard_banner.opacity = 0.0
+            if hasattr(self, "home_results_header_lbl") and self.home_results_header_lbl:
+                self.home_results_header_lbl.height = 0
+                self.home_results_header_lbl.opacity = 0.0
+                self.home_results_header_lbl.text = ""
+            if hasattr(self, "home_recommendations_container") and self.home_recommendations_container:
+                self.home_recommendations_container.clear_widgets()
             self.update_status("Ready. Paste video/playlist link or search above.", 0)
 
         def on_url_input_changed(self, instance, text):
@@ -8020,6 +8256,7 @@ if KIVY_AVAILABLE:
             self.update_status(f"Starting {plat} download engine...", 5)
 
             def worker():
+                notif_mgr = getattr(self, "notification_manager", None) or get_notification_manager()
                 try:
                     import yt_dlp
 
@@ -8079,7 +8316,8 @@ if KIVY_AVAILABLE:
                                 if (now - self.last_notif_time) > 1.2 or pct >= 99:
                                     self.last_notif_time = now
                                     notif_title = f"[{cur_i}/{tot}] {cur_t}" if tot > 1 else f"Downloading: {cur_t}"
-                                    self.notification_manager.show_progress(notif_title, notif_pct, speed_str)
+                                    if notif_mgr:
+                                        notif_mgr.show_progress(notif_title, notif_pct, speed_str)
 
                         elif d.get("status") == "finished":
                             Clock.schedule_once(
@@ -8215,7 +8453,8 @@ if KIVY_AVAILABLE:
                                     f"Starting [{i}/{tot}]: {safe_display_text(t)}...", p
                                 )
                             )
-                            self.notification_manager.show_progress(f"[{idx}/{total_count}] {raw_item_title}", overall_start_pct)
+                            if notif_mgr:
+                                notif_mgr.show_progress(f"[{idx}/{total_count}] {raw_item_title}", overall_start_pct)
 
                         item_opts = dict(base_ydl_opts)
                         if total_count > 1:
@@ -8256,10 +8495,11 @@ if KIVY_AVAILABLE:
                                                 self.download_state.get("percent", 0)
                                             )
                                         )
-                                        self.notification_manager.show_progress(
-                                            f"Network reconnecting ({net_attempt}/{max_net_retries})...",
-                                            self.download_state.get("percent", 0)
-                                        )
+                                        if notif_mgr:
+                                            notif_mgr.show_progress(
+                                                f"Network reconnecting ({net_attempt}/{max_net_retries})...",
+                                                self.download_state.get("percent", 0)
+                                            )
                                         for _ in range(int(backoff_sec * 2)):
                                             if self.download_state.get("cancel_requested"):
                                                 raise DownloadCancelledException("Download cancelled by user.")
@@ -8539,11 +8779,13 @@ if KIVY_AVAILABLE:
                         last_file = saved_files[-1]
                         if total_count > 1:
                             msg = f"[color=#00E676]Download Complete![/color] {len(saved_files)} of {total_count} saved."
-                            self.notification_manager.show_finished(f"MSK YTDL {plat}", f"{len(saved_files)} items saved")
+                            if notif_mgr:
+                                notif_mgr.show_finished(f"MSK YTDL {plat}", f"{len(saved_files)} items saved")
                         else:
                             clean_fname = safe_display_text(last_file.name)
                             msg = f"[color=#00E676]Done![/color] Saved: {clean_fname}"
-                            self.notification_manager.show_finished(f"MSK YTDL {plat}", clean_fname)
+                            if notif_mgr:
+                                notif_mgr.show_finished(f"MSK YTDL {plat}", clean_fname)
 
                         Clock.schedule_once(lambda dt, m=msg: self.update_status(m, 100))
                     else:
@@ -8555,7 +8797,8 @@ if KIVY_AVAILABLE:
 
                 except DownloadCancelledException:
                     print("[MSK-YTDL] Download cancelled by user.")
-                    self.notification_manager.cancel()
+                    if notif_mgr:
+                        notif_mgr.cancel()
                     # Clean up partial fragments
                     try:
                         for pf in list(self.download_state.get("current_part_files", [])):
@@ -8586,7 +8829,8 @@ if KIVY_AVAILABLE:
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
-                    self.notification_manager.cancel()
+                    if notif_mgr:
+                        notif_mgr.cancel()
                     err_msg = str(e)
                     if "File name too long" in err_msg or "Errno 36" in err_msg:
                         user_friendly_err = "Storage filename error. Please try downloading again."

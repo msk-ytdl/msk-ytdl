@@ -1093,13 +1093,15 @@ def test_audio_download_preserves_real_song_name():
     app.update_status = lambda msg, p: None
     app.current_preview_info = {"url": "https://www.youtube.com/watch?v=abcdefghijk", "title": "Arijit Singh - Kesariya"}
     app.download_btn = type("DummyBtn", (), {"disabled": False, "text": ""})()
+    app.switch_tab = lambda tab: None
 
-    # Pass real audio song title
-    app.start_download(
-        target_url="https://www.youtube.com/watch?v=abcdefghijk",
-        chosen_format="Audio (High Quality 320kbps MP3)",
-        media_title="Arijit Singh - Kesariya",
-    )
+    # Pass real audio song title with thread execution intercepted to avoid background network error
+    with patch("threading.Thread.start"):
+        app.start_download(
+            target_url="https://www.youtube.com/watch?v=abcdefghijk",
+            chosen_format="Audio (High Quality 320kbps MP3)",
+            media_title="Arijit Singh - Kesariya",
+        )
 
     # Active download title must be the real song name, NOT "Media Download"
     assert app.download_state["title"] == "Arijit Singh - Kesariya"
@@ -1169,39 +1171,62 @@ def test_bottom_nav_has_only_home_and_downloads():
     assert len(nav_bar.children) == 2
 
 
-def test_home_view_has_no_suggestions_or_chips():
-    """Verify home view does not contain suggestions feed or category chips."""
+def test_home_view_has_no_category_chips_or_initial_suggestions():
+    """Verify home view does not contain category chips and starts with empty search results."""
     from mobile_app import MSKDownloaderMobile, KIVY_AVAILABLE
     if not KIVY_AVAILABLE:
         return
     app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
     app.active_tab = "home"
     app.download_state = {}
-    app.active_tab = "home"
     home_view = app.build_home_view()
-    assert not hasattr(app, "home_recommendations_container")
     assert not hasattr(app, "home_category_chips")
-    assert not hasattr(app, "home_results_header_lbl")
+    assert hasattr(app, "home_recommendations_container")
+    assert hasattr(app, "home_results_header_lbl")
+    # Starts hidden and empty before any search
+    assert app.home_results_header_lbl.height == 0
+    assert len(app.home_recommendations_container.children) == 0
 
 
-def test_home_search_and_download_routes_to_fetch_preview():
-    """Verify searching a non-URL query uses ytsearch1 to directly load preview & modal."""
+def test_home_search_and_download_routes_to_search_youtube_home():
+    """Verify searching a non-URL query calls search_youtube_home to load multiple results."""
     from mobile_app import MSKDownloaderMobile
     app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
     app.url_input = type("DummyInput", (), {"text": "Alan Walker Faded"})()
     app.update_status = lambda msg, p: None
 
     called_args = []
-    app.fetch_preview = lambda url, auto_open_modal=False: called_args.append((url, auto_open_modal))
+    app.search_youtube_home = lambda query: called_args.append(query)
 
     app.on_home_search_clicked()
     assert len(called_args) == 1
-    assert called_args[0] == ("ytsearch1:Alan Walker Faded", True)
+    assert called_args[0] == "Alan Walker Faded"
 
     called_args.clear()
     app.on_main_download_clicked(None)
     assert len(called_args) == 1
-    assert called_args[0] == ("ytsearch1:Alan Walker Faded", True)
+    assert called_args[0] == "Alan Walker Faded"
+
+
+def test_render_home_video_results_adds_multiple_cards():
+    """Verify multiple search results are rendered as individual video cards."""
+    from mobile_app import MSKDownloaderMobile, KIVY_AVAILABLE
+    if not KIVY_AVAILABLE:
+        return
+    from kivy.clock import Clock
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    app.active_tab = "home"
+    app.download_state = {}
+    app.build_home_view()
+    app.update_status = lambda msg, p: None
+
+    mock_results = [
+        {"id": f"vid_{i}", "title": f"Song {i}", "channel": f"Artist {i}", "duration": "3:30", "url": f"https://youtube.com/watch?v=vid_{i}", "thumb": ""}
+        for i in range(5)
+    ]
+    app.render_home_video_results(mock_results, "Song")
+    Clock.tick()
+    assert len(app.home_recommendations_container.children) == 5
 
 
 def test_switch_tab_videos_fallback_to_home():
