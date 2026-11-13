@@ -3640,9 +3640,9 @@ if KIVY_AVAILABLE:
             self.main_container = BoxLayout(orientation="vertical", size_hint_y=1.0)
             root.add_widget(self.main_container)
 
-            # Build all 3 Tab Views
+            # Build Tab Views (Home & Downloads)
             self.home_view = self.build_home_view()
-            self.videos_view = self.build_videos_view()
+            self.videos_view = None
             self.downloads_view = self.build_downloads_view()
 
             # Start on Home view
@@ -3655,7 +3655,7 @@ if KIVY_AVAILABLE:
             root.add_widget(self.mini_player_bar)
 
             # -------------------------------------------------------------
-            # Bottom Navigation Footer Bar (Home / Downloads / Videos)
+            # Bottom Navigation Footer Bar (Home / Downloads)
             # -------------------------------------------------------------
             self.nav_footer = self.create_bottom_nav()
             root.add_widget(self.nav_footer)
@@ -3664,7 +3664,6 @@ if KIVY_AVAILABLE:
             Clock.schedule_once(self.check_initial_intent, 0.4)
             Clock.schedule_once(lambda dt: self.refresh_library(), 0.6)
             Clock.schedule_once(lambda dt: sync_and_migrate_legacy_downloads(), 1.0)
-            Clock.schedule_once(lambda dt: self.populate_home_recommendations(), 0.5)
             Clock.schedule_interval(self.check_clipboard, 2.5)
 
             # Feature 6: Silent GitHub update check in background
@@ -4097,13 +4096,13 @@ if KIVY_AVAILABLE:
             modal.open()
 
         # -----------------------------------------------------------------
-        # Bottom Navigation Footer Bar Builder (Home / Videos / Downloads)
+        # Bottom Navigation Footer Bar Builder (Home / Downloads)
         # -----------------------------------------------------------------
         def create_bottom_nav(self) -> BoxLayout:
             nav_bar = StyledCard(
                 orientation="horizontal",
-                padding=[dp(4), dp(3)],
-                spacing=dp(4),
+                padding=[dp(8), dp(3)],
+                spacing=dp(8),
                 size_hint_y=None,
                 height=dp(56),
                 bg_color=(0.07, 0.08, 0.13, 1.0),
@@ -4112,10 +4111,6 @@ if KIVY_AVAILABLE:
             self.nav_btn_home = NavTabItem("home", "home.png", "HOME", is_active=True)
             self.nav_btn_home.bind(on_press=lambda ins: self.switch_tab("home"))
             nav_bar.add_widget(self.nav_btn_home)
-
-            self.nav_btn_videos = NavTabItem("videos", "videos.png", "VIDEOS", is_active=False)
-            self.nav_btn_videos.bind(on_press=lambda ins: self.switch_tab("videos"))
-            nav_bar.add_widget(self.nav_btn_videos)
 
             self.nav_btn_downloads = NavTabItem("downloads", "downloads.png", "DOWNLOADS", is_active=False)
             self.nav_btn_downloads.bind(on_press=lambda ins: self.switch_tab("downloads"))
@@ -4140,19 +4135,21 @@ if KIVY_AVAILABLE:
             self.active_tab = tab_name
             self.main_container.clear_widgets()
 
-            self.nav_btn_home.set_active(tab_name == "home")
-            self.nav_btn_videos.set_active(tab_name == "videos")
-            self.nav_btn_downloads.set_active(tab_name == "downloads")
+            if hasattr(self, "nav_btn_home") and self.nav_btn_home:
+                self.nav_btn_home.set_active(tab_name == "home")
+            if hasattr(self, "nav_btn_videos") and self.nav_btn_videos:
+                self.nav_btn_videos.set_active(tab_name == "videos")
+            if hasattr(self, "nav_btn_downloads") and self.nav_btn_downloads:
+                self.nav_btn_downloads.set_active(tab_name == "downloads")
 
-            if tab_name == "home":
-                self.main_container.add_widget(self.home_view)
-            elif tab_name == "downloads":
+            if tab_name == "downloads":
                 self.main_container.add_widget(self.downloads_view)
                 Clock.schedule_once(lambda dt: self.rebuild_active_downloads_section(), 0.02)
                 Clock.schedule_once(lambda dt: self.refresh_library(), 0.05)
-            elif tab_name == "videos":
+            elif tab_name == "videos" and hasattr(self, "videos_view") and self.videos_view:
                 self.main_container.add_widget(self.videos_view)
-                Clock.schedule_once(lambda dt: self.populate_recommendations(), 0.05)
+            else:
+                self.main_container.add_widget(self.home_view)
 
         # -----------------------------------------------------------------
         # View 1: Home View (Input, Preview, Format, Download, Progress)
@@ -4459,60 +4456,6 @@ if KIVY_AVAILABLE:
             self.download_btn.height = 0
             self.download_btn.opacity = 0
             self.download_btn.bind(on_press=self.on_main_download_clicked)
-
-            # Category Chips (Horizontal scrollable chips)
-            chip_scroll = ScrollView(do_scroll_x=True, do_scroll_y=False, size_hint_y=None, height=dp(34))
-            chip_box = BoxLayout(orientation="horizontal", spacing=dp(6), size_hint_x=None)
-            chip_box.bind(minimum_width=chip_box.setter("width"))
-
-            self.home_category_chips = {}
-            categories = [
-                ("🔥 ALL", "Trending Videos 2026"),
-                ("🎵 MUSIC", "Top Bollywood English Music Hits"),
-                ("😂 COMEDY", "Trending Comedy Standup"),
-                ("🎬 MOVIES", "Latest Movie Trailers Teasers"),
-                ("🎮 GAMING", "Trending Gaming Highlights"),
-                ("📻 LO-FI", "Relaxing LoFi Chill Beats"),
-                ("💻 TECH", "Latest Tech & AI News"),
-            ]
-            for cat_name, cat_query in categories:
-                btn = Button(
-                    text=cat_name,
-                    font_size="10.5sp",
-                    bold=True,
-                    size_hint=(None, None),
-                    size=(dp(82), dp(32)),
-                    background_color=(0.13, 0.16, 0.23, 1.0),
-                    color=(0.75, 0.80, 0.90, 1.0),
-                )
-                btn.bind(on_press=lambda ins, q=cat_query, n=cat_name: self.on_home_category_chip_clicked(n, q))
-                self.home_category_chips[cat_name] = btn
-                chip_box.add_widget(btn)
-
-            chip_scroll.add_widget(chip_box)
-            content.add_widget(chip_scroll)
-
-            # Results Section Header
-            self.home_results_header_lbl = Label(
-                text="[b]Trending & Recommended[/b]",
-                markup=True,
-                font_size="13sp",
-                color=(0.95, 0.95, 1.0, 1.0),
-                size_hint_y=None,
-                height=dp(22),
-                halign="left",
-            )
-            self.home_results_header_lbl.bind(size=self.home_results_header_lbl.setter("text_size"))
-            content.add_widget(self.home_results_header_lbl)
-
-            # Dynamic Video Results Container on Home
-            self.home_recommendations_container = BoxLayout(
-                orientation="vertical",
-                spacing=dp(10),
-                size_hint_y=None,
-            )
-            self.home_recommendations_container.bind(minimum_height=self.home_recommendations_container.setter("height"))
-            content.add_widget(self.home_recommendations_container)
 
             # Storage Destination Note
             dest_card = StyledCard(
@@ -5073,164 +5016,11 @@ if KIVY_AVAILABLE:
                 self.active_dl_title.text = f"[b]{t}[/b]" + (f" • [color=#64B5F6]{fmt}[/color]" if fmt else "")
 
         # -----------------------------------------------------------------
-        # View 3: Videos View (Search YouTube & Dynamic Trending Picks)
+        # Videos View Removed (Home & Downloads are the 2 active tabs)
         # -----------------------------------------------------------------
-        def build_videos_view(self) -> ScrollView:
-            scroll = ScrollView(do_scroll_x=False, do_scroll_y=True)
-            content = BoxLayout(
-                orientation="vertical",
-                padding=[dp(14), dp(10), dp(14), dp(20)],
-                spacing=dp(10),
-                size_hint_y=None,
-            )
-            content.bind(minimum_height=content.setter("height"))
-
-            # Header Card
-            rec_header_card = StyledCard(
-                orientation="vertical",
-                padding=[dp(14), dp(10)],
-                spacing=dp(2),
-                size_hint_y=None,
-                height=dp(56),
-                bg_color=(0.09, 0.11, 0.17, 1.0),
-            )
-            rec_title = Label(
-                text="[b]Discover & Search YouTube[/b]",
-                markup=True,
-                font_size="14sp",
-                color=(0.95, 0.95, 1.0, 1.0),
-                size_hint_y=None,
-                height=dp(20),
-                halign="left",
-            )
-            rec_title.bind(size=rec_title.setter("text_size"))
-
-            rec_subtitle = Label(
-                text="Search any song, artist, video or tap category chips below",
-                font_size="10.5sp",
-                color=(0.65, 0.70, 0.80, 1.0),
-                size_hint_y=None,
-                height=dp(16),
-                halign="left",
-            )
-            rec_subtitle.bind(size=rec_subtitle.setter("text_size"))
-
-            rec_header_card.add_widget(rec_title)
-            rec_header_card.add_widget(rec_subtitle)
-            content.add_widget(rec_header_card)
-
-            # Search Box Card
-            search_card = StyledCard(
-                orientation="vertical",
-                padding=[dp(12), dp(10)],
-                spacing=dp(8),
-                size_hint_y=None,
-                height=dp(94),
-                bg_color=(0.09, 0.11, 0.17, 1.0),
-            )
-            self.video_search_input = TextInput(
-                hint_text="Search YouTube videos, songs, artists...",
-                multiline=False,
-                font_size="13sp",
-                size_hint_y=None,
-                height=dp(40),
-                background_color=(0.14, 0.16, 0.24, 1.0),
-                foreground_color=(1, 1, 1, 1),
-                cursor_color=(1, 0.75, 0, 1),
-                padding=[dp(10), dp(10)],
-            )
-            self.video_search_input.bind(on_text_validate=lambda ins: self.on_search_clicked())
-            search_card.add_widget(self.video_search_input)
-
-            # Search Action Buttons: [SEARCH] [CLEAR] [SHUFFLE] with icons
-            btn_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(34))
-            self.search_btn = IconActionButton(
-                icon_path="search.png",
-                text="SEARCH",
-                bg_color=(1.0, 0.68, 0.0, 1.0),
-                text_color=(0.04, 0.05, 0.08, 1.0),
-                font_size="11sp",
-            )
-            self.search_btn.bind(on_press=lambda ins: self.on_search_clicked())
-
-            clear_search_btn = IconActionButton(
-                icon_path="clear.png",
-                text="CLEAR",
-                bg_color=(0.18, 0.20, 0.28, 1.0),
-                text_color=(0.80, 0.85, 0.95, 1.0),
-                font_size="11sp",
-            )
-            clear_search_btn.bind(on_press=lambda ins: self.on_search_clear_clicked())
-
-            shuffle_btn = IconActionButton(
-                icon_path="shuffle.png",
-                text="SHUFFLE",
-                bg_color=(0.18, 0.24, 0.38, 1.0),
-                text_color=(0.40, 0.85, 1.0, 1.0),
-                font_size="11sp",
-            )
-            shuffle_btn.bind(on_press=lambda ins: self.on_shuffle_trending())
-
-            btn_row.add_widget(self.search_btn)
-            btn_row.add_widget(clear_search_btn)
-            btn_row.add_widget(shuffle_btn)
-            search_card.add_widget(btn_row)
-            content.add_widget(search_card)
-
-            # Category Chips
-            chip_scroll = ScrollView(do_scroll_x=True, do_scroll_y=False, size_hint_y=None, height=dp(34))
-            chip_box = BoxLayout(orientation="horizontal", spacing=dp(6), size_hint_x=None)
-            chip_box.bind(minimum_width=chip_box.setter("width"))
-
-            self.category_chips = {}
-            categories = [
-                ("TRENDING", "Trending Videos 2026"),
-                ("MUSIC", "Top Music Hits 2026"),
-                ("GAMING", "Trending Gaming Highlights"),
-                ("TECH", "Latest Tech & AI News"),
-                ("LO-FI", "Relaxing LoFi Beats Chill"),
-            ]
-            for cat_name, cat_query in categories:
-                btn = Button(
-                    text=cat_name,
-                    font_size="10.5sp",
-                    bold=True,
-                    size_hint=(None, None),
-                    size=(dp(82), dp(32)),
-                    background_color=(0.13, 0.16, 0.23, 1.0),
-                    color=(0.75, 0.80, 0.90, 1.0),
-                )
-                btn.bind(on_press=lambda ins, q=cat_query, n=cat_name: self.on_category_chip_clicked(n, q))
-                self.category_chips[cat_name] = btn
-                chip_box.add_widget(btn)
-
-            chip_scroll.add_widget(chip_box)
-            content.add_widget(chip_scroll)
-
-            # Results Section Title
-            self.results_header_lbl = Label(
-                text="[b]Trending & Recommended[/b]",
-                markup=True,
-                font_size="13sp",
-                color=(0.95, 0.95, 1.0, 1.0),
-                size_hint_y=None,
-                height=dp(22),
-                halign="left",
-            )
-            self.results_header_lbl.bind(size=self.results_header_lbl.setter("text_size"))
-            content.add_widget(self.results_header_lbl)
-
-            # Recommendations & Search Results Container
-            self.recommendations_container = BoxLayout(
-                orientation="vertical",
-                spacing=dp(10),
-                size_hint_y=None,
-            )
-            self.recommendations_container.bind(minimum_height=self.recommendations_container.setter("height"))
-            content.add_widget(self.recommendations_container)
-
-            scroll.add_widget(content)
-            return scroll
+        def build_videos_view(self):
+            """Videos tab removed - returns None."""
+            return None
 
         def play_audio_in_background(self, media_item: Optional[Dict[str, Any]] = None):
             """Play video's audio track in background using mini player engine with screen-off support."""
@@ -5314,317 +5104,7 @@ if KIVY_AVAILABLE:
 
 
         # -----------------------------------------------------------------
-        # Videos Search & Recommendation Helpers
-        # -----------------------------------------------------------------
-        def on_search_clicked(self):
-            """Execute in-app YouTube search."""
-            query = self.video_search_input.text.strip()
-            if not query:
-                return
-            self.search_youtube(query)
-
-        def on_search_clear_clicked(self):
-            """Reset search input and restore default trending picks."""
-            self.video_search_input.text = ""
-            for btn in self.category_chips.values():
-                btn.background_color = (0.13, 0.16, 0.23, 1.0)
-                btn.color = (0.75, 0.80, 0.90, 1.0)
-            self.populate_recommendations()
-
-        def on_category_chip_clicked(self, cat_name: str, cat_query: str):
-            """Filter by selected category chip."""
-            for name, btn in self.category_chips.items():
-                if name == cat_name:
-                    btn.background_color = (0.20, 0.28, 0.44, 1.0)
-                    btn.color = (1.0, 0.75, 0.0, 1.0)
-                else:
-                    btn.background_color = (0.13, 0.16, 0.23, 1.0)
-                    btn.color = (0.75, 0.80, 0.90, 1.0)
-            self.video_search_input.text = cat_query
-            self.search_youtube(cat_query, section_title=f"{cat_name} Picks")
-
-        def on_shuffle_trending(self):
-            """Shuffle random popular topic and search instantly."""
-            import random
-            topics = [
-                "Trending Bollywood Songs",
-                "Top Electronic Dance Music",
-                "Trending Podcasts",
-                "AI Animation Filmmaking",
-                "Python Coding Projects",
-                "Best LoFi Study Beats",
-                "Grand Theft Auto 6 Highlights",
-                "NoCopyrightSounds Mix",
-            ]
-            picked = random.choice(topics)
-            self.video_search_input.text = picked
-            self.search_youtube(picked, section_title="Shuffled Picks")
-
-        def search_youtube(self, query: str, section_title: Optional[str] = None):
-            """Search YouTube via yt-dlp flat extraction without requiring API keys."""
-            title = section_title or f"Results for: {query[:25]}"
-            self.results_header_lbl.text = f"[b]{title}[/b]"
-            self.recommendations_container.clear_widgets()
-
-            # Loading indicator
-            loading_card = StyledCard(
-                orientation="vertical",
-                padding=[dp(16), dp(16)],
-                spacing=dp(6),
-                size_hint_y=None,
-                height=dp(70),
-                bg_color=(0.08, 0.10, 0.15, 1.0),
-            )
-            loading_lbl = Label(
-                text=f"Searching YouTube for \"{query[:28]}\"...\nPlease wait.",
-                font_size="12sp",
-                color=(1.0, 0.75, 0.0, 1.0),
-                halign="center",
-            )
-            loading_lbl.bind(size=loading_lbl.setter("text_size"))
-            loading_card.add_widget(loading_lbl)
-            self.recommendations_container.add_widget(loading_card)
-
-            def worker():
-                results = []
-                try:
-                    import yt_dlp
-                    safe_logger = AndroidYTDLLogger()
-                    ydl_opts = {
-                        "extract_flat": True,
-                        "skip_download": True,
-                        "logger": safe_logger,
-                        "quiet": True,
-                        "no_warnings": True,
-                        "socket_timeout": 15,
-                    }
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        res = ydl.extract_info(f"ytsearch10:{query}", download=False)
-                        if res and "entries" in res:
-                            for entry in res["entries"]:
-                                if not entry:
-                                    continue
-                                vid_id = entry.get("id")
-                                vid_title = entry.get("title") or "YouTube Video"
-                                vid_uploader = entry.get("uploader") or entry.get("channel") or "YouTube"
-                                dur_sec = entry.get("duration")
-                                vid_duration = format_duration(dur_sec) if dur_sec else "Video"
-                                vid_thumb = entry.get("thumbnail") or (
-                                    f"https://i.ytimg.com/vi/{vid_id}/mqdefault.jpg" if vid_id else ""
-                                )
-                                vid_url = entry.get("url") or entry.get("webpage_url") or (
-                                    f"https://www.youtube.com/watch?v={vid_id}" if vid_id else ""
-                                )
-                                results.append({
-                                    "title": vid_title,
-                                    "channel": vid_uploader,
-                                    "duration": vid_duration,
-                                    "url": vid_url,
-                                    "thumb": vid_thumb,
-                                    "category": "YouTube",
-                                })
-                except Exception as e:
-                    print(f"[Search] YouTube search error: {e}")
-
-                Clock.schedule_once(lambda dt, r=results, q=query: self.render_video_results(r, q))
-
-            threading.Thread(target=worker, daemon=True).start()
-
-        @mainthread
-        def render_video_results(self, results: List[Dict[str, Any]], query: str):
-            """Display live YouTube search results."""
-            self.recommendations_container.clear_widgets()
-            if not results:
-                empty_card = StyledCard(
-                    orientation="vertical",
-                    padding=[dp(16), dp(16)],
-                    spacing=dp(6),
-                    size_hint_y=None,
-                    height=dp(80),
-                    bg_color=(0.08, 0.10, 0.15, 1.0),
-                )
-                empty_lbl = Label(
-                    text=f"No results found for \"{query[:25]}\".\nCheck connection or try another search term.",
-                    font_size="11.5sp",
-                    color=(0.70, 0.75, 0.85, 1.0),
-                    halign="center",
-                )
-                empty_lbl.bind(size=empty_lbl.setter("text_size"))
-                empty_card.add_widget(empty_lbl)
-                self.recommendations_container.add_widget(empty_card)
-                return
-
-            for item in results:
-                self.add_video_result_card(item)
-
-        def add_video_result_card(self, item: Dict[str, Any], container: Optional[BoxLayout] = None):
-            """Create a video card with safe thumbnail, in-app PLAY modal, and 1-tap GET/Download popup."""
-            card = StyledCard(
-                orientation="horizontal",
-                padding=[dp(10), dp(8)],
-                spacing=dp(10),
-                size_hint_y=None,
-                height=dp(88),
-                bg_color=(0.10, 0.12, 0.18, 1.0),
-            )
-
-            # Thumbnail with safe error fallback to prevent red cross X
-            thumb_url = item.get("thumb") or ""
-            thumb = AsyncImage(
-                source=thumb_url,
-                size_hint=(None, None),
-                size=(dp(96), dp(64)),
-                allow_stretch=True,
-                keep_ratio=True,
-            )
-            def on_thumb_error(instance, *args):
-                for candidate in ("icon.png", "assets/logo.png"):
-                    if os.path.exists(candidate):
-                        instance.source = candidate
-                        break
-                instance.opacity = 0.6
-            thumb.bind(on_error=on_thumb_error)
-            card.add_widget(thumb)
-
-            # Info column
-            info_col = BoxLayout(orientation="vertical", spacing=dp(2), size_hint_x=1.0)
-            clean_t = safe_display_text(item.get("title", ""))
-            t_lbl = Label(
-                text=f"[b]{clean_t[:42]}[/b]",
-                markup=True,
-                font_size="11.5sp",
-                color=(0.95, 0.95, 1.0, 1.0),
-                halign="left",
-                valign="top",
-                size_hint_y=None,
-                height=dp(32),
-            )
-            t_lbl.bind(size=t_lbl.setter("text_size"))
-            info_col.add_widget(t_lbl)
-
-            channel_name = safe_display_text(item.get("channel", "YouTube"))
-            dur_str = item.get("duration", "Video")
-            meta_lbl = Label(
-                text=f"{dur_str} • {channel_name[:22]}",
-                font_size="10sp",
-                color=(0.65, 0.70, 0.82, 1.0),
-                halign="left",
-                valign="middle",
-                size_hint_y=None,
-                height=dp(16),
-            )
-            meta_lbl.bind(size=meta_lbl.setter("text_size"))
-            info_col.add_widget(meta_lbl)
-            card.add_widget(info_col)
-
-            # Action Buttons Column: [PLAY] and [GET]
-            btn_col = BoxLayout(orientation="vertical", spacing=dp(4), size_hint=(None, None), size=(dp(68), dp(68)))
-
-            play_btn = IconActionButton(
-                icon_path="play.png",
-                text="PLAY",
-                font_size="10.5sp",
-                size_hint_y=0.5,
-                bg_color=(0.18, 0.24, 0.38, 1.0),
-                text_color=(0.40, 0.85, 1.0, 1.0),
-            )
-            def on_card_play(ins, it=item):
-                dl_file = find_downloaded_media_file(title=it.get("title"), item_id=it.get("id"))
-                if dl_file and dl_file.exists():
-                    open_media_file(dl_file)
-                else:
-                    self.open_video_player_modal(it)
-
-            play_btn.bind(on_press=on_card_play)
-            btn_col.add_widget(play_btn)
-
-            dl_btn = IconActionButton(
-                icon_path="download_arrow.png",
-                text="GET",
-                font_size="10.5sp",
-                size_hint_y=0.5,
-                bg_color=(1.0, 0.68, 0.0, 1.0),
-                text_color=(0.04, 0.05, 0.08, 1.0),
-            )
-            dl_btn.bind(on_press=lambda ins, it=item: self.open_download_modal(it))
-            btn_col.add_widget(dl_btn)
-
-            card.add_widget(btn_col)
-
-            target_container = container if container is not None else self.recommendations_container
-            target_container.add_widget(card)
-
-        @mainthread
-        def populate_recommendations(self):
-            """Display curated and shuffled trending videos with permanent working thumbnails."""
-            self.results_header_lbl.text = "[b]Trending & Recommended[/b]"
-            self.recommendations_container.clear_widgets()
-
-            catalog = [
-                {
-                    "title": "Alan Walker - Faded (Official Music Video)",
-                    "channel": "Alan Walker",
-                    "duration": "3:32",
-                    "url": "https://www.youtube.com/watch?v=60ItHLz5WEA",
-                    "thumb": "https://i.ytimg.com/vi/60ItHLz5WEA/mqdefault.jpg",
-                    "category": "Music HQ",
-                },
-                {
-                    "title": "Python Programming Full Course for Beginners",
-                    "channel": "freeCodeCamp",
-                    "duration": "4:26:52",
-                    "url": "https://www.youtube.com/watch?v=_uQrJ0TkZlc",
-                    "thumb": "https://i.ytimg.com/vi/_uQrJ0TkZlc/mqdefault.jpg",
-                    "category": "Coding & Tech",
-                },
-                {
-                    "title": "1,000 Termites vs. House (Full Documentary)",
-                    "channel": "AntsCanada",
-                    "duration": "12:13",
-                    "url": "https://www.youtube.com/watch?v=UqmP868N59w",
-                    "thumb": "https://i.ytimg.com/vi/UqmP868N59w/mqdefault.jpg",
-                    "category": "Documentary",
-                },
-                {
-                    "title": "Alan Walker - The Spectre (NCS Official)",
-                    "channel": "NoCopyrightSounds",
-                    "duration": "3:13",
-                    "url": "https://www.youtube.com/watch?v=AOeY-nDp7hI",
-                    "thumb": "https://i.ytimg.com/vi/AOeY-nDp7hI/mqdefault.jpg",
-                    "category": "Gaming Music",
-                },
-                {
-                    "title": "How to Create AI Movies & Animation with Free Tools",
-                    "channel": "AI Creators",
-                    "duration": "14:48",
-                    "url": "https://www.youtube.com/watch?v=aircAruvnKk",
-                    "thumb": "https://i.ytimg.com/vi/aircAruvnKk/mqdefault.jpg",
-                    "category": "Tech & AI",
-                },
-                {
-                    "title": "Ed Sheeran - Shape of You (Official Music Video)",
-                    "channel": "Ed Sheeran",
-                    "duration": "4:23",
-                    "url": "https://www.youtube.com/watch?v=JGwWNGJdvx8",
-                    "thumb": "https://i.ytimg.com/vi/JGwWNGJdvx8/mqdefault.jpg",
-                    "category": "Pop Music",
-                },
-            ]
-
-            import random
-            random.shuffle(catalog)
-            for item in catalog:
-                self.add_video_result_card(item)
-
-        def load_recommended_video(self, video_url: str):
-            """Load a video from search/recommendations into Home tab with live preview and modal."""
-            self.url_input.text = video_url
-            self.switch_tab("home")
-            self.fetch_preview(video_url, auto_open_modal=True)
-            self.update_status("[color=#FFB300]Loaded video![/color] Select format to download.", 0)
-
-        # -----------------------------------------------------------------
-        # Home Page Search & Recommendations Logic
+        # Home Page Search & Download Logic
         # -----------------------------------------------------------------
         def on_main_download_clicked(self, instance):
             """Trigger download options modal for currently entered URL(s) or active preview."""
@@ -5638,7 +5118,7 @@ if KIVY_AVAILABLE:
                 return
             normalized = all_urls[0] if all_urls else normalize_youtube_url(url)
             if not normalized:
-                self.search_youtube_home(url)
+                self.fetch_preview(f"ytsearch1:{url}", auto_open_modal=True)
                 return
             if hasattr(self, "current_preview_info") and self.current_preview_info and self.current_preview_info.get("url") == normalized:
                 self.open_download_modal(self.current_preview_info)
@@ -5659,182 +5139,15 @@ if KIVY_AVAILABLE:
                 self.current_preview_url = normalized
                 self.fetch_preview(normalized, auto_open_modal=True)
             else:
-                self.search_youtube_home(query)
+                self.fetch_preview(f"ytsearch1:{query}", auto_open_modal=True)
 
-        def on_home_category_chip_clicked(self, cat_name: str, cat_query: str):
-            """Filter Home discover feed by category chip."""
-            for name, btn in self.home_category_chips.items():
-                if name == cat_name:
-                    btn.background_color = (0.20, 0.28, 0.44, 1.0)
-                    btn.color = (1.0, 0.75, 0.0, 1.0)
-                else:
-                    btn.background_color = (0.13, 0.16, 0.23, 1.0)
-                    btn.color = (0.75, 0.80, 0.90, 1.0)
-            if hasattr(self, "url_input"):
-                self.url_input.hint_text = f"Browsing {cat_name}... Paste link or search"
-            if cat_name in ("🔥 ALL", "TRENDING"):
-                self.populate_home_recommendations()
-            else:
-                self.search_youtube_home(cat_query, section_title=f"{cat_name} Feed")
+        def populate_recommendations(self):
+            """Stub maintained for backward compatibility."""
+            pass
 
-        def search_youtube_home(self, query: str, section_title: Optional[str] = None):
-            """Search YouTube and display cards directly on Home page."""
-            title = section_title or f"Results for: {query[:25]}"
-            self.home_results_header_lbl.text = f"[b]{title}[/b]"
-            self.home_recommendations_container.clear_widgets()
-
-            loading_card = StyledCard(
-                orientation="vertical",
-                padding=[dp(16), dp(14)],
-                spacing=dp(6),
-                size_hint_y=None,
-                height=dp(70),
-                bg_color=(0.08, 0.10, 0.15, 1.0),
-            )
-            loading_lbl = Label(
-                text=f"Searching YouTube for \"{query[:28]}\"...\nPlease wait.",
-                font_size="12sp",
-                color=(1.0, 0.75, 0.0, 1.0),
-                halign="center",
-            )
-            loading_lbl.bind(size=loading_lbl.setter("text_size"))
-            loading_card.add_widget(loading_lbl)
-            self.home_recommendations_container.add_widget(loading_card)
-
-            def worker():
-                results = []
-                try:
-                    import yt_dlp
-                    safe_logger = AndroidYTDLLogger()
-                    ydl_opts = {
-                        "extract_flat": True,
-                        "skip_download": True,
-                        "logger": safe_logger,
-                        "quiet": True,
-                        "no_warnings": True,
-                        "socket_timeout": 15,
-                    }
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        res = ydl.extract_info(f"ytsearch10:{query}", download=False)
-                        if res and "entries" in res:
-                            for entry in res["entries"]:
-                                if not entry:
-                                    continue
-                                vid_id = entry.get("id")
-                                vid_title = entry.get("title") or "YouTube Video"
-                                vid_uploader = entry.get("uploader") or entry.get("channel") or "YouTube"
-                                dur_sec = entry.get("duration")
-                                vid_duration = format_duration(dur_sec) if dur_sec else "Video"
-                                vid_thumb = entry.get("thumbnail") or (
-                                    f"https://i.ytimg.com/vi/{vid_id}/mqdefault.jpg" if vid_id else ""
-                                )
-                                vid_url = entry.get("url") or entry.get("webpage_url") or (
-                                    f"https://www.youtube.com/watch?v={vid_id}" if vid_id else ""
-                                )
-                                results.append({
-                                    "title": vid_title,
-                                    "channel": vid_uploader,
-                                    "duration": vid_duration,
-                                    "url": vid_url,
-                                    "thumb": vid_thumb,
-                                    "category": "YouTube",
-                                })
-                except Exception as e:
-                    print(f"[Home Search] YouTube search error: {e}")
-
-                Clock.schedule_once(lambda dt, r=results, q=query: self.render_home_video_results(r, q))
-
-            threading.Thread(target=worker, daemon=True).start()
-
-        @mainthread
-        def render_home_video_results(self, results: List[Dict[str, Any]], query: str):
-            """Display live search results on Home page."""
-            self.home_recommendations_container.clear_widgets()
-            if not results:
-                empty_card = StyledCard(
-                    orientation="vertical",
-                    padding=[dp(16), dp(16)],
-                    spacing=dp(6),
-                    size_hint_y=None,
-                    height=dp(80),
-                    bg_color=(0.08, 0.10, 0.15, 1.0),
-                )
-                empty_lbl = Label(
-                    text=f"No results found for \"{query[:25]}\".\nCheck connection or try another search term.",
-                    font_size="11.5sp",
-                    color=(0.70, 0.75, 0.85, 1.0),
-                    halign="center",
-                )
-                empty_lbl.bind(size=empty_lbl.setter("text_size"))
-                empty_card.add_widget(empty_lbl)
-                self.home_recommendations_container.add_widget(empty_card)
-                return
-
-            for item in results:
-                self.add_video_result_card(item, container=self.home_recommendations_container)
-
-        @mainthread
         def populate_home_recommendations(self):
-            """Populate curated and trending picks on Home page."""
-            if not hasattr(self, "home_recommendations_container"):
-                return
-            self.home_results_header_lbl.text = "[b]Trending & Recommended[/b]"
-            self.home_recommendations_container.clear_widgets()
-
-            catalog = [
-                {
-                    "title": "Alan Walker - Faded (Official Music Video)",
-                    "channel": "Alan Walker",
-                    "duration": "3:32",
-                    "url": "https://www.youtube.com/watch?v=60ItHLz5WEA",
-                    "thumb": "https://i.ytimg.com/vi/60ItHLz5WEA/mqdefault.jpg",
-                    "category": "Music HQ",
-                },
-                {
-                    "title": "Python Programming Full Course for Beginners",
-                    "channel": "freeCodeCamp",
-                    "duration": "4:26:52",
-                    "url": "https://www.youtube.com/watch?v=_uQrJ0TkZlc",
-                    "thumb": "https://i.ytimg.com/vi/_uQrJ0TkZlc/mqdefault.jpg",
-                    "category": "Coding & Tech",
-                },
-                {
-                    "title": "Alan Walker - The Spectre (NCS Official)",
-                    "channel": "NoCopyrightSounds",
-                    "duration": "3:13",
-                    "url": "https://www.youtube.com/watch?v=AOeY-nDp7hI",
-                    "thumb": "https://i.ytimg.com/vi/AOeY-nDp7hI/mqdefault.jpg",
-                    "category": "Gaming Music",
-                },
-                {
-                    "title": "How to Create AI Movies & Animation with Free Tools",
-                    "channel": "AI Creators",
-                    "duration": "14:48",
-                    "url": "https://www.youtube.com/watch?v=aircAruvnKk",
-                    "thumb": "https://i.ytimg.com/vi/aircAruvnKk/mqdefault.jpg",
-                    "category": "Tech & AI",
-                },
-                {
-                    "title": "Ed Sheeran - Shape of You (Official Music Video)",
-                    "channel": "Ed Sheeran",
-                    "duration": "4:23",
-                    "url": "https://www.youtube.com/watch?v=JGwWNGJdvx8",
-                    "thumb": "https://i.ytimg.com/vi/JGwWNGJdvx8/mqdefault.jpg",
-                    "category": "Pop Music",
-                },
-                {
-                    "title": "1,000 Termites vs. House (Full Documentary)",
-                    "channel": "AntsCanada",
-                    "duration": "12:13",
-                    "url": "https://www.youtube.com/watch?v=UqmP868N59w",
-                    "thumb": "https://i.ytimg.com/vi/UqmP868N59w/mqdefault.jpg",
-                    "category": "Documentary",
-                },
-            ]
-            import random
-            random.shuffle(catalog)
-            for item in catalog:
-                self.add_video_result_card(item, container=self.home_recommendations_container)
+            """Stub maintained for backward compatibility."""
+            pass
 
         # -----------------------------------------------------------------
         # In-App Video Player & Download Options Modals
@@ -6556,7 +5869,6 @@ if KIVY_AVAILABLE:
             self.clipboard_banner.height = 0
             self.clipboard_banner.opacity = 0.0
             self.update_status("Ready. Paste video/playlist link or search above.", 0)
-            self.populate_home_recommendations()
 
         def on_url_input_changed(self, instance, text):
             """Trigger real-time preview when user pastes or edits a valid YouTube / media link or batch links."""

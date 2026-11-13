@@ -1154,6 +1154,82 @@ def test_install_apk_file_validation():
     assert install_apk_file(Path("non_existent_file.apk")) is False
 
 
+def test_bottom_nav_has_only_home_and_downloads():
+    """Verify that bottom nav bar only contains HOME and DOWNLOADS tabs (VIDEOS tab removed)."""
+    from mobile_app import MSKDownloaderMobile, KIVY_AVAILABLE
+    if not KIVY_AVAILABLE:
+        return
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    app.active_tab = "home"
+    nav_bar = app.create_bottom_nav()
+    assert hasattr(app, "nav_btn_home")
+    assert hasattr(app, "nav_btn_downloads")
+    assert not hasattr(app, "nav_btn_videos")
+    # Exactly 2 navigation items in the bar
+    assert len(nav_bar.children) == 2
+
+
+def test_home_view_has_no_suggestions_or_chips():
+    """Verify home view does not contain suggestions feed or category chips."""
+    from mobile_app import MSKDownloaderMobile, KIVY_AVAILABLE
+    if not KIVY_AVAILABLE:
+        return
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    app.active_tab = "home"
+    app.download_state = {}
+    app.active_tab = "home"
+    home_view = app.build_home_view()
+    assert not hasattr(app, "home_recommendations_container")
+    assert not hasattr(app, "home_category_chips")
+    assert not hasattr(app, "home_results_header_lbl")
+
+
+def test_home_search_and_download_routes_to_fetch_preview():
+    """Verify searching a non-URL query uses ytsearch1 to directly load preview & modal."""
+    from mobile_app import MSKDownloaderMobile
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    app.url_input = type("DummyInput", (), {"text": "Alan Walker Faded"})()
+    app.update_status = lambda msg, p: None
+
+    called_args = []
+    app.fetch_preview = lambda url, auto_open_modal=False: called_args.append((url, auto_open_modal))
+
+    app.on_home_search_clicked()
+    assert len(called_args) == 1
+    assert called_args[0] == ("ytsearch1:Alan Walker Faded", True)
+
+    called_args.clear()
+    app.on_main_download_clicked(None)
+    assert len(called_args) == 1
+    assert called_args[0] == ("ytsearch1:Alan Walker Faded", True)
+
+
+def test_switch_tab_videos_fallback_to_home():
+    """Verify switching to 'videos' tab safely redirects to home when videos view is removed."""
+    from mobile_app import MSKDownloaderMobile, KIVY_AVAILABLE
+    if not KIVY_AVAILABLE:
+        return
+    app = MSKDownloaderMobile.__new__(MSKDownloaderMobile)
+    app.active_tab = "downloads"
+    app.is_vault_unlocked = False
+    added = []
+    app.main_container = type("DummyContainer", (), {
+        "children": [1],
+        "clear_widgets": lambda self: None,
+        "add_widget": lambda self, w: added.append(w),
+    })()
+    app.nav_btn_home = type("DummyBtn", (), {"set_active": lambda self, a: None})()
+    app.nav_btn_downloads = type("DummyBtn", (), {"set_active": lambda self, a: None})()
+    app.home_view = "HOME_VIEW"
+    app.videos_view = None
+    app.downloads_view = "DOWNLOADS_VIEW"
+
+    app.switch_tab("videos")
+    assert app.active_tab == "videos"
+    assert "HOME_VIEW" in added
+
+
+
 
 
 
