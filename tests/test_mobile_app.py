@@ -1426,6 +1426,51 @@ def test_install_via_package_installer_session_safety(tmp_path):
     assert install_via_package_installer_session(None, fake_apk) is False
 
 
+def test_play_downloaded_video_launches_system_player(tmp_path):
+    """Verify downloaded video files are played via system/gallery player (open_media_file)."""
+    from mobile_app import MSKDownloaderMobile, KIVY_AVAILABLE
+    from unittest.mock import patch
+    if not KIVY_AVAILABLE:
+        return
+
+    test_video = tmp_path / "test_downloaded.mp4"
+    test_video.write_bytes(b"\x00\x00\x00 ftypisom" + b"\x00" * 50)
+
+    app = MSKDownloaderMobile()
+    with patch("mobile_app.open_media_file") as mock_open:
+        app.play_video_file(test_video, title="Test Downloaded Video")
+        assert mock_open.called
+        assert mock_open.call_args[0][0] == test_video
+
+
+def test_open_builtin_media_player_redirects_downloaded_to_system_player(tmp_path):
+    """Verify open_builtin_media_player routes already-downloaded videos to system/gallery player."""
+    from mobile_app import MSKDownloaderMobile, KIVY_AVAILABLE
+    from unittest.mock import patch
+    if not KIVY_AVAILABLE:
+        return
+
+    test_video = tmp_path / "already_downloaded.mp4"
+    test_video.write_bytes(b"\x00\x00\x00 ftypisom" + b"\x00" * 50)
+
+    app = MSKDownloaderMobile()
+    with patch("mobile_app.open_media_file") as mock_open:
+        res = app.open_builtin_media_player(file_path=test_video, media_type="video")
+        # For already downloaded video, returns None and launches system player
+        assert res is None
+        assert mock_open.called
+        assert mock_open.call_args[0][0] == test_video
+
+
+def test_play_online_stream_on_android_safety():
+    """Verify play_online_stream_on_android returns False safely on non-Android or empty URL."""
+    from mobile_app import play_online_stream_on_android
+
+    assert play_online_stream_on_android("") is False
+    assert play_online_stream_on_android(None) is False
+    assert play_online_stream_on_android("https://example.com/stream.mp4") is False
+
+
 
 
 
